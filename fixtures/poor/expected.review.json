@@ -1,0 +1,1 @@
+{"risk":"high","findings":[{"ruleId":"go-cli.execute-error","severity":"high","evidenceCount":1}],"positiveKeys":[],"ship":false}
