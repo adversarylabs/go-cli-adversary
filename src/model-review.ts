@@ -1,6 +1,8 @@
 import {
   formatOpinion,
+  isOpinionConcernPhrase,
   ModelUnavailableError,
+  requireOpinionConcern,
   type ChangeContext,
   type ModelReviewRequest,
   type RuleContext,
@@ -308,16 +310,19 @@ export function applyModelCliReview(
     (left, right) =>
       severityRank(right.severity) - severityRank(left.severity) || left.id.localeCompare(right.id),
   );
-  // Opinion prose is "I would address <concern> before …". Use a short noun
-  // phrase derived from the top observation title only. Free-form primaryConcern
-  // is often a full clause and produces ungrammatical formatOpinion output.
-  const concern = opinionConcernFromTitle(rankedObservations[0]?.title);
-
   // Never advertise ship-as-is when static or model work still shows material issues.
   const blocking =
     staticSeverities.some((severity) => severityRank(severity) >= severityRank("medium")) ||
     modelObservationSeverities.some((severity) => severityRank(severity) >= severityRank("medium"));
   const ship = output.ship && !blocking;
+
+  // Opinion prose is "I would address <concern> before …". Only pass phrases that
+  // pass SDK requireOpinionConcern (noun phrases), never free-form model essays.
+  const concern = resolveOpinionConcern([
+    rankedObservations[0]?.title,
+    output.primaryConcern,
+    rankedObservations[0] === undefined ? undefined : categoryConcern(rankedObservations[0].category),
+  ]);
 
   ctx.review.opinion(
     formatOpinion({
@@ -421,29 +426,91 @@ function severityRank(severity: StaticSeverity | ModelCliObservation["severity"]
 }
 
 /**
- * Build a concern phrase for formatOpinion from an observation title.
- * Prefer a short headline; for "X forces/overrides Y" keep only the code-ish subject.
+ * Try candidates until one is a valid SDK noun-phrase concern.
+ * Derives short subjects from clause titles when possible.
  */
-function opinionConcernFromTitle(title: string | undefined): string | undefined {
-  if (title === undefined) return undefined;
-  const normalized = title.trim().replace(/\s+/g, " ");
-  if (normalized === "") return undefined;
+function resolveOpinionConcern(candidates: Array<string | undefined>): string | undefined {
+  for (const candidate of candidates) {
+    if (candidate === undefined) continue;
+    for (const derived of deriveConcernCandidates(candidate)) {
+      if (isOpinionConcernPhrase(derived)) {
+        return requireOpinionConcern(derived);
+      }
+    }
+  }
+  return undefined;
+}
 
-  // "defer os.Exit(124) forces exit code 124..." -> "defer os.Exit(124)"
-  const codeSubject = normalized.match(
-    /^(.{3,90}?(?:\([^)]*\)|os\.Exit|context\.\w+|exec\.\w+|cmd\.\w+))\s+(?:forces?|overrides?|causes?|prevents?|blocks?|breaks?)\b/i,
+function deriveConcernCandidates(raw: string): string[] {
+  const normalized = raw.trim().replace(/\s+/g, " ");
+  if (normalized === "") return [];
+  const out: string[] = [];
+  const push = (value: string | undefined) => {
+    // SDK rejects ".!?" anywhere (so identifiers like os.Exit cannot be concerns).
+    const cleaned = value?.trim().replace(/[.!?,:;]+$/g, "");
+    if (cleaned && !/[.!?]/.test(cleaned) && !out.includes(cleaned)) {
+      out.push(cleaned);
+    }
+  };
+
+  // "… forces exit code 124 regardless …" -> "forced exit code 124"
+  const forcedCode = normalized.match(
+    /\b(?:forces?|overrides?|causes?)\s+((?:an?\s+|the\s+)?(?:exit\s+)?code\s+\d+)\b/i,
   );
-  if (codeSubject?.[1] !== undefined) {
-    return codeSubject[1].trim().replace(/[.!?,:;]+$/g, "");
+  if (forcedCode?.[1] !== undefined) {
+    const code = forcedCode[1].replace(/^(an?|the)\s+/i, "").trim();
+    push(`forced ${code}`);
   }
 
-  const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] ?? normalized;
-  const cleaned = firstSentence.replace(/[.!?]+$/g, "").trim();
-  const words = cleaned.split(/\s+/);
-  if (words.length <= 10 && cleaned.length <= 90) {
-    return cleaned;
+  // "Commands replace/discard inherited context with X" -> "inherited context in command handlers"
+  const replaceShape = normalized.match(
+    /^(?:commands?|handlers?|paths?)\s+(?:replace|discard|use|start with)\s+(.+?)(?:\s*,|\s+with\b|\s+instead\b|$)/i,
+  );
+  if (replaceShape?.[1] !== undefined) {
+    push(`${replaceShape[1].trim()} in command handlers`);
   }
-  return words.slice(0, 8).join(" ");
+
+  // Prefer short titles without sentence punctuation as-is.
+  const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] ?? normalized;
+  push(firstSentence.replace(/[.!?]+$/g, "").trim());
+
+  // Last resort: first few words without terminal punctuation or dotted identifiers.
+  const words = firstSentence
+    .replace(/[.!?]+$/g, "")
+    .trim()
+    .split(/\s+/)
+    .filter((word) => !/[.!?]/.test(word));
+  push(words.slice(0, 6).join(" "));
+
+  return out;
+}
+
+function categoryConcern(category: string): string | undefined {
+  switch (category) {
+    case "cancellation":
+      return "broken command cancellation context";
+    case "exit-codes":
+      return "incorrect process exit-code handling";
+    case "stdout-stderr":
+      return "stdout and stderr contract violations";
+    case "flags-args":
+      return "incompatible flag or argument defaults";
+    case "subprocess":
+    case "automation":
+      return "subprocesses that ignore cancellation";
+    case "completeness":
+      return "incomplete command implementation";
+    case "errors":
+      return "non-actionable command error behavior";
+    case "configuration":
+      return "configuration compatibility issues";
+    case "command-behavior":
+      return "incorrect command behavior";
+    case "interactive":
+      return "interactive versus non-interactive contract issues";
+    default:
+      return undefined;
+  }
 }
 
 function maxSeverity(values: Array<StaticSeverity | ModelCliObservation["severity"]>): StaticSeverity {

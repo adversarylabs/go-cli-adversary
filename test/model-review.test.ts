@@ -404,8 +404,8 @@ func run() {
   assert.equal(result.assessment?.risk, "high", "risk must be max(static high, model)");
   assert.match(result.opinion?.summary ?? "", /before shipping|before merging|before committing/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
-  // Concern comes from observation title (noun phrase), not free-form primaryConcern.
-  assert.match(result.opinion?.summary ?? "", /Commands discard inherited context/i);
+  // Title clause is rewritten to a grammatical noun phrase; primaryConcern prose is ignored.
+  assert.match(result.opinion?.summary ?? "", /I would address inherited context in command handlers/i);
   assert.doesNotMatch(
     result.opinion?.summary ?? "",
     /cancellation is broken across most commands/i,
@@ -479,7 +479,8 @@ func run() error { return nil }
 
   const result = await runWithModel(root, model);
   assert.equal(result.opinion?.ship, false);
-  assert.match(result.opinion?.summary ?? "", /defer os\.Exit\(124\)/);
+  // Title "… forces exit code 124 …" becomes a noun phrase; dotted identifiers are not used.
+  assert.match(result.opinion?.summary ?? "", /I would address forced exit code 124/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /overrides the normal exit-code path/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /exit 1/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
