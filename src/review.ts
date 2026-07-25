@@ -72,7 +72,8 @@ export async function reviewDomain(
     active.map((item) => item.rule.id),
   );
 
-  const modelStatus = await runModelCliReview(ctx, analysis, discoveryFiles);
+  const staticSeverities = active.map((item) => item.rule.severity);
+  const modelStatus = await runModelCliReview(ctx, analysis, discoveryFiles, staticSeverities);
   if (modelStatus === "applied") {
     return;
   }

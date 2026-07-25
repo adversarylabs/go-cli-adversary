@@ -363,3 +363,84 @@ func main() { os.Exit(1) }
     0,
   );
 });
+
+test("model ship:true is overridden when static high findings exist", async () => {
+  const root = await writeCliFixture("ship-override-static", {
+    "cmd/root.go": `package main
+
+import "os"
+
+func run() {
+	os.Exit(1)
+}
+`,
+  });
+  const model = capturingModel({
+    assessment: {
+      risk: "medium",
+      summary: "Cancellation is the main issue, but the model optimistically ships.",
+    },
+    ship: true,
+    primaryConcern:
+      "cancellation is broken across most commands: context.Background()/context.TODO() replaces the signal-aware context, so Ctrl+C cannot interrupt network calls or subprocesses",
+    observations: [
+      {
+        id: "cancel-story",
+        title: "Commands discard inherited context",
+        category: "cancellation",
+        severity: "medium",
+        confidence: "high",
+        summary: "RunE handlers use context.Background instead of cmd.Context().",
+        whyItMatters: "Ctrl+C does not stop API calls.",
+        recommendation: "Thread cmd.Context() through handlers.",
+        evidenceIds: ["file:cmd/root.go"],
+      },
+    ],
+  });
+
+  const result = await runWithModel(root, model);
+  assert.equal(result.opinion?.ship, false, "blocking static/model work must not ship");
+  assert.equal(result.assessment?.risk, "high", "risk must be max(static high, model)");
+  assert.match(result.opinion?.summary ?? "", /before shipping|before merging|before committing/i);
+  assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
+  // Concern should be a short phrase, not the full model paragraph.
+  assert.ok(
+    (result.opinion?.summary ?? "").length < 280,
+    `opinion too long / unclipped concern: ${result.opinion?.summary}`,
+  );
+});
+
+test("model ship:true is overridden by medium model observations alone", async () => {
+  const root = await writeCliFixture("ship-override-model", {
+    "cmd/ok.go": `package main
+
+func run() error { return nil }
+`,
+  });
+  const model = capturingModel({
+    assessment: {
+      risk: "low",
+      summary: "One CLI contract issue remains.",
+    },
+    ship: true,
+    primaryConcern: "stdout/stderr contract violation",
+    observations: [
+      {
+        id: "streams",
+        title: "Progress mixed with JSON on stdout",
+        category: "stdout-stderr",
+        severity: "medium",
+        confidence: "high",
+        summary: "Human progress and JSON share stdout.",
+        whyItMatters: "Pipelines break.",
+        recommendation: "Send progress to stderr.",
+        evidenceIds: ["file:cmd/ok.go"],
+      },
+    ],
+  });
+
+  const result = await runWithModel(root, model);
+  assert.equal(result.opinion?.ship, false);
+  assert.equal(result.assessment?.risk, "medium");
+  assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
+});

@@ -281,29 +281,44 @@ export function buildModelReviewRequestFromDiscovery(
   };
 }
 
+export type StaticSeverity = "none" | "low" | "medium" | "high" | "critical";
+
 export function applyModelCliReview(
   ctx: RuleContext,
   output: ModelCliReview,
   evidenceById: Map<string, PreparedEvidenceItem>,
+  staticSeverities: StaticSeverity[] = [],
 ): void {
+  const modelObservationSeverities = output.observations.map((item) => item.severity);
+  const risk = maxSeverity([
+    output.assessment.risk,
+    ...staticSeverities,
+    ...modelObservationSeverities,
+  ]);
+
   ctx.review.assessment({
-    risk: output.assessment.risk,
+    risk,
     summary: output.assessment.summary,
   });
 
-  const concern =
-    output.primaryConcern?.trim() ||
-    output.observations
-      .slice()
-      .sort(
-        (left, right) =>
-          severityRank(right.severity) - severityRank(left.severity) || left.id.localeCompare(right.id),
-      )[0]?.title;
+  const rankedObservations = output.observations.slice().sort(
+    (left, right) =>
+      severityRank(right.severity) - severityRank(left.severity) || left.id.localeCompare(right.id),
+  );
+  const concern = shortConcern(
+    output.primaryConcern?.trim() || rankedObservations[0]?.title,
+  );
+
+  // Never advertise ship-as-is when static or model work still shows material issues.
+  const blocking =
+    staticSeverities.some((severity) => severityRank(severity) >= severityRank("medium")) ||
+    modelObservationSeverities.some((severity) => severityRank(severity) >= severityRank("medium"));
+  const ship = output.ship && !blocking;
 
   ctx.review.opinion(
     formatOpinion({
-      ship: output.ship,
-      ...(concern === undefined || concern === "" ? {} : { concern }),
+      ship,
+      ...(concern === undefined ? {} : { concern }),
       change: ctx.change,
     }),
   );
@@ -343,6 +358,7 @@ export async function runModelCliReview(
   ctx: RuleContext,
   analysis: Analysis,
   files: DiscoveryFile[],
+  staticSeverities: StaticSeverity[] = [],
 ): Promise<"applied" | "unavailable"> {
   const { request, evidenceById } = buildModelReviewRequestFromDiscovery(
     ctx.change,
@@ -351,7 +367,7 @@ export async function runModelCliReview(
   );
   try {
     const result = await ctx.model.review<ModelCliReview>(request);
-    applyModelCliReview(ctx, result.output, evidenceById);
+    applyModelCliReview(ctx, result.output, evidenceById, staticSeverities);
     return "applied";
   } catch (error) {
     if (error instanceof ModelUnavailableError) {
@@ -385,7 +401,7 @@ function pathPriority(path: string): number {
   return 3;
 }
 
-function severityRank(severity: ModelCliObservation["severity"]): number {
+function severityRank(severity: StaticSeverity | ModelCliObservation["severity"]): number {
   switch (severity) {
     case "critical":
       return 4;
@@ -395,5 +411,26 @@ function severityRank(severity: ModelCliObservation["severity"]): number {
       return 2;
     case "low":
       return 1;
+    case "none":
+      return 0;
   }
+}
+
+function shortConcern(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (normalized === "") return undefined;
+  const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] ?? normalized;
+  const clipped = firstSentence.length > 120 ? `${firstSentence.slice(0, 117).trimEnd()}...` : firstSentence;
+  return clipped.replace(/[.!?]+$/g, "").trim();
+}
+
+function maxSeverity(values: Array<StaticSeverity | ModelCliObservation["severity"]>): StaticSeverity {
+  let best: StaticSeverity = "none";
+  for (const value of values) {
+    if (severityRank(value) > severityRank(best)) {
+      best = value;
+    }
+  }
+  return best;
 }

@@ -20750,18 +20750,29 @@ function buildModelReviewRequestFromDiscovery(change, analysis, files) {
     }
   };
 }
-function applyModelCliReview(ctx, output, evidenceById) {
+function applyModelCliReview(ctx, output, evidenceById, staticSeverities = []) {
+  const modelObservationSeverities = output.observations.map((item) => item.severity);
+  const risk = maxSeverity([
+    output.assessment.risk,
+    ...staticSeverities,
+    ...modelObservationSeverities
+  ]);
   ctx.review.assessment({
-    risk: output.assessment.risk,
+    risk,
     summary: output.assessment.summary
   });
-  const concern = output.primaryConcern?.trim() || output.observations.slice().sort(
+  const rankedObservations = output.observations.slice().sort(
     (left, right) => severityRank(right.severity) - severityRank(left.severity) || left.id.localeCompare(right.id)
-  )[0]?.title;
+  );
+  const concern = shortConcern(
+    output.primaryConcern?.trim() || rankedObservations[0]?.title
+  );
+  const blocking = staticSeverities.some((severity) => severityRank(severity) >= severityRank("medium")) || modelObservationSeverities.some((severity) => severityRank(severity) >= severityRank("medium"));
+  const ship = output.ship && !blocking;
   ctx.review.opinion(
     formatOpinion({
-      ship: output.ship,
-      ...concern === void 0 || concern === "" ? {} : { concern },
+      ship,
+      ...concern === void 0 ? {} : { concern },
       change: ctx.change
     })
   );
@@ -20790,7 +20801,7 @@ function applyModelCliReview(ctx, output, evidenceById) {
     });
   }
 }
-async function runModelCliReview(ctx, analysis, files) {
+async function runModelCliReview(ctx, analysis, files, staticSeverities = []) {
   const { request, evidenceById } = buildModelReviewRequestFromDiscovery(
     ctx.change,
     analysis,
@@ -20798,7 +20809,7 @@ async function runModelCliReview(ctx, analysis, files) {
   );
   try {
     const result = await ctx.model.review(request);
-    applyModelCliReview(ctx, result.output, evidenceById);
+    applyModelCliReview(ctx, result.output, evidenceById, staticSeverities);
     return "applied";
   } catch (error) {
     if (error instanceof ModelUnavailableError) {
@@ -20838,7 +20849,26 @@ function severityRank(severity) {
       return 2;
     case "low":
       return 1;
+    case "none":
+      return 0;
   }
+}
+function shortConcern(value) {
+  if (value === void 0) return void 0;
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (normalized === "") return void 0;
+  const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] ?? normalized;
+  const clipped = firstSentence.length > 120 ? `${firstSentence.slice(0, 117).trimEnd()}...` : firstSentence;
+  return clipped.replace(/[.!?]+$/g, "").trim();
+}
+function maxSeverity(values) {
+  let best = "none";
+  for (const value of values) {
+    if (severityRank(value) > severityRank(best)) {
+      best = value;
+    }
+  }
+  return best;
 }
 
 // src/review.ts
@@ -20895,7 +20925,8 @@ async function reviewDomain(ctx, analysis, discoveryFiles = []) {
     analysis,
     active.map((item) => item.rule.id)
   );
-  const modelStatus = await runModelCliReview(ctx, analysis, discoveryFiles);
+  const staticSeverities = active.map((item) => item.rule.severity);
+  const modelStatus = await runModelCliReview(ctx, analysis, discoveryFiles, staticSeverities);
   if (modelStatus === "applied") {
     return;
   }
