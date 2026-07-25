@@ -11,7 +11,7 @@ import { reviewDomain } from "./review.js";
 export function createApp(): Adversary {
   const app = new Adversary({
     name: domain.name,
-    version: "0.0.1",
+    version: "0.0.2",
     // Domain already ranks and caps findings; keep SDK cap aligned.
     review: { maximumFindings: 3, minimumConfidence: "medium" },
   });
@@ -34,7 +34,15 @@ export function createApp(): Adversary {
         },
       });
     }
-    reviewDomain(ctx, analysis);
+    await reviewDomain(
+      ctx,
+      analysis,
+      discovery.files.map((file) => ({
+        path: file.path,
+        current: file.current,
+        status: file.status,
+      })),
+    );
   });
   return app;
 }

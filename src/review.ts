@@ -1,5 +1,6 @@
 import { formatOpinion, type RuleContext } from "@adversarylabs/sdk";
 import { domain } from "./domain.js";
+import { runModelCliReview, type DiscoveryFile } from "./model-review.js";
 import { type Analysis, type RuleDefinition, type Signal } from "./types.js";
 
 const RISK_ORDER = { none: 0, low: 1, medium: 2, high: 3, critical: 4 } as const;
@@ -14,7 +15,11 @@ const COMMAND_SCOPED_RULES = new Set([
   "go-cli.subprocess-no-context",
 ]);
 
-export function reviewDomain(ctx: RuleContext, analysis: Analysis): void {
+export async function reviewDomain(
+  ctx: RuleContext,
+  analysis: Analysis,
+  discoveryFiles: DiscoveryFile[] = [],
+): Promise<void> {
   const candidates: Array<{ rule: RuleDefinition; total: number; samples: Signal[] }> = [];
   for (const rule of domain.rules) {
     const raw = analysis.signals.filter((signal) => signal.ruleId === rule.id);
@@ -61,7 +66,18 @@ export function reviewDomain(ctx: RuleContext, analysis: Analysis): void {
     });
   }
 
-  addPositives(ctx, analysis, active.map((item) => item.rule.id));
+  addPositives(
+    ctx,
+    analysis,
+    active.map((item) => item.rule.id),
+  );
+
+  const staticSeverities = active.map((item) => item.rule.severity);
+  const modelStatus = await runModelCliReview(ctx, analysis, discoveryFiles, staticSeverities);
+  if (modelStatus === "applied") {
+    return;
+  }
+
   if (active.length === 0) {
     ctx.review.assessment({ risk: "none", summary: domain.noRiskSummary });
     ctx.review.opinion({ ship: true, summary: domain.approvalSummary });
@@ -89,7 +105,6 @@ function selectSignals(
   let pool = signals;
   if (COMMAND_SCOPED_RULES.has(ruleId)) {
     const commandHits = signals.filter((signal) => isCommandPath(signal.path));
-    // Prefer command/entrypoint paths when present; otherwise keep all (better than silence).
     if (commandHits.length > 0) {
       pool = commandHits;
     }
@@ -106,7 +121,6 @@ function selectSignals(
   };
 }
 
-/** Lower is higher priority for sampling. */
 function pathPriority(path: string): number {
   const normalized = path.replaceAll("\\", "/");
   if (/(^|\/)main\.go$/.test(normalized)) return 0;
@@ -120,9 +134,7 @@ function isCommandPath(path: string): boolean {
   return pathPriority(path) <= 2;
 }
 
-function assessmentSummary(
-  active: Array<{ rule: RuleDefinition; total: number }>,
-): string {
+function assessmentSummary(active: Array<{ rule: RuleDefinition; total: number }>): string {
   if (active.length === 1) {
     const only = active[0]!;
     return `Fix first: ${only.rule.concern} (${siteLabel(only.total)}).`;
@@ -138,11 +150,7 @@ function siteLabel(count: number): string {
   return count === 1 ? "1 site" : `${count} sites`;
 }
 
-function addPositives(
-  ctx: RuleContext,
-  analysis: Analysis,
-  activeRuleIds: string[],
-): void {
+function addPositives(ctx: RuleContext, analysis: Analysis, activeRuleIds: string[]): void {
   const byKey = new Map<string, typeof analysis.positives>();
   for (const item of analysis.positives) {
     const existing = byKey.get(item.key) ?? [];
