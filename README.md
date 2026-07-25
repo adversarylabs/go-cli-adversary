@@ -12,6 +12,17 @@ It reviews process-boundary ownership, cancellation, and subprocess safety:
 
 See [docs/cli-checklist.md](docs/cli-checklist.md) for roadmap coverage against a broader Go CLI checklist.
 
+## Model-assisted CLI review
+
+When the Adversary CLI provides a model broker (`permissions.model: true`), go-cli keeps
+deterministic discovery and lifecycle findings, then asks the model for a small number of
+high-confidence CLI-contract observations (flags, exit/stream contracts, cancellation stories,
+automation compatibility, incomplete command paths). Provider credentials and model selection
+stay in the CLI; this package only calls `ctx.model.review(...)`.
+
+Runtime model calls require a CLI build that includes the model-broker feature. Unit tests inject
+a deterministic `ReviewModel` and never call a live provider.
+
 ## Fixtures and calibration
 
 Five graded fixtures own expected review snapshots. The 61-repository benchmark index calibrates command lifecycle and configuration judgment without copying source.

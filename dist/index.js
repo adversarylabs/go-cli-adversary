@@ -7090,7 +7090,7 @@ var require__ = __commonJS({
     var discriminator_1 = require_discriminator();
     var json_schema_2020_12_1 = require_json_schema_2020_12();
     var META_SCHEMA_ID = "https://json-schema.org/draft/2020-12/schema";
-    var Ajv20202 = class extends core_1.default {
+    var Ajv20203 = class extends core_1.default {
       constructor(opts = {}) {
         super({
           ...opts,
@@ -7117,11 +7117,11 @@ var require__ = __commonJS({
         return this.opts.defaultMeta = super.defaultMeta() || (this.getSchema(META_SCHEMA_ID) ? META_SCHEMA_ID : void 0);
       }
     };
-    exports.Ajv2020 = Ajv20202;
-    module2.exports = exports = Ajv20202;
-    module2.exports.Ajv2020 = Ajv20202;
+    exports.Ajv2020 = Ajv20203;
+    module2.exports = exports = Ajv20203;
+    module2.exports.Ajv2020 = Ajv20203;
     Object.defineProperty(exports, "__esModule", { value: true });
-    exports.default = Ajv20202;
+    exports.default = Ajv20203;
     var validate_1 = require_validate();
     Object.defineProperty(exports, "KeywordCxt", { enumerable: true, get: function() {
       return validate_1.KeywordCxt;
@@ -14488,9 +14488,298 @@ import { realpath } from "node:fs/promises";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // node_modules/@adversarylabs/sdk/dist/index.js
-var import__ = __toESM(require__(), 1);
+var import__2 = __toESM(require__(), 1);
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+
+// node_modules/@adversarylabs/sdk/dist/model.js
+var import__ = __toESM(require__(), 1);
+var ADVERSARY_MODEL_PROTOCOL_VERSION = 1;
+var ADVERSARY_MODEL_ENDPOINT_ENV = "ADVERSARY_MODEL_ENDPOINT";
+var ADVERSARY_MODEL_TOKEN_ENV = "ADVERSARY_MODEL_TOKEN";
+var DEFAULT_MODEL_TIMEOUT_MS = 12e4;
+var MAX_MODEL_TIMEOUT_MS = 6e5;
+var DEFAULT_MAXIMUM_OUTPUT_TOKENS = 8192;
+var MAX_MAXIMUM_OUTPUT_TOKENS = 65536;
+var MAX_PROMPT_BYTES = 256 << 10;
+var MAX_INPUT_BYTES = 4 << 20;
+var MAX_SCHEMA_BYTES = 512 << 10;
+var MAX_RESPONSE_BYTES = 4 << 20;
+var ModelUnavailableError = class extends Error {
+  constructor(message = "Model review is unavailable for this adversary execution.") {
+    super(message);
+    this.name = "ModelUnavailableError";
+  }
+};
+var ModelReviewError = class extends Error {
+  code;
+  retryable;
+  constructor(message, options = {}) {
+    super(message);
+    this.name = "ModelReviewError";
+    this.code = options.code;
+    this.retryable = options.retryable ?? false;
+  }
+};
+function createModelFromEnvironment(environment = process.env) {
+  const endpoint = environment[ADVERSARY_MODEL_ENDPOINT_ENV]?.trim();
+  const token = environment[ADVERSARY_MODEL_TOKEN_ENV]?.trim();
+  if (endpoint === void 0 || endpoint === "" || token === void 0 || token === "") {
+    return unavailableModel();
+  }
+  return new BrokerReviewModel(endpoint, token);
+}
+function unavailableModel() {
+  return Object.freeze({
+    async review() {
+      throw new ModelUnavailableError();
+    }
+  });
+}
+var BrokerReviewModel = class {
+  endpoint;
+  #token;
+  constructor(endpoint, token) {
+    const parsed = new URL(endpoint);
+    if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1" && parsed.hostname !== "::1" && parsed.hostname !== "[::1]" && parsed.hostname !== "localhost") {
+      throw new ModelReviewError("The model broker endpoint must use HTTP on the local loopback interface.", { code: "invalid_broker_endpoint" });
+    }
+    if (token.trim() === "") {
+      throw new ModelReviewError("The model broker token must not be empty.", {
+        code: "invalid_broker_token"
+      });
+    }
+    this.endpoint = parsed.toString();
+    this.#token = token;
+  }
+  async review(request) {
+    const normalized = normalizeRequest(request);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), normalized.budget.timeoutMs);
+    try {
+      let response;
+      try {
+        response = await fetch(this.endpoint, {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            authorization: `Bearer ${this.#token}`,
+            "content-type": "application/json",
+            "x-adversary-model-protocol": String(ADVERSARY_MODEL_PROTOCOL_VERSION)
+          },
+          body: JSON.stringify({
+            protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+            prompt: normalized.prompt,
+            input: normalized.input,
+            schema: normalized.schema,
+            budget: normalized.budget
+          }),
+          signal: controller.signal
+        });
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw modelTimeoutError(normalized.budget.timeoutMs);
+        }
+        throw new ModelReviewError(`Model broker request failed: ${error instanceof Error ? error.message : String(error)}`, { code: "broker_unavailable", retryable: true });
+      }
+      let body2;
+      try {
+        body2 = await readBoundedResponse(response);
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw modelTimeoutError(normalized.budget.timeoutMs);
+        }
+        throw error;
+      }
+      let decoded;
+      try {
+        decoded = JSON.parse(body2);
+      } catch {
+        throw new ModelReviewError("Model broker returned malformed JSON.", {
+          code: "invalid_broker_response"
+        });
+      }
+      if (!response.ok) {
+        const failure = decoded;
+        throw new ModelReviewError(failure.error?.message ?? `Model broker returned HTTP ${response.status}.`, {
+          code: failure.error?.code ?? "model_review_failed",
+          retryable: failure.error?.retryable ?? response.status >= 500
+        });
+      }
+      const envelope = requireBrokerResponse(decoded);
+      validateModelOutput(normalized.schema, envelope.output);
+      return {
+        output: envelope.output,
+        provider: envelope.provider,
+        model: envelope.model,
+        ...envelope.usage === void 0 ? {} : { usage: envelope.usage }
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+};
+function modelTimeoutError(timeoutMs) {
+  return new ModelReviewError(`Model review exceeded its ${timeoutMs}ms timeout.`, {
+    code: "model_timeout",
+    retryable: true
+  });
+}
+function normalizeRequest(request) {
+  if (typeof request !== "object" || request === null) {
+    throw new ModelReviewError("Model review request must be an object.", {
+      code: "invalid_model_request"
+    });
+  }
+  if (typeof request.prompt !== "string" || request.prompt.trim() === "") {
+    throw new ModelReviewError("Model review prompt must be a non-empty string.", {
+      code: "invalid_model_request"
+    });
+  }
+  const promptBytes = Buffer.byteLength(request.prompt, "utf8");
+  if (promptBytes > MAX_PROMPT_BYTES) {
+    throw new ModelReviewError(`Model review prompt exceeds ${MAX_PROMPT_BYTES} bytes.`, {
+      code: "model_request_too_large"
+    });
+  }
+  requireJsonSize(request.input, "input", MAX_INPUT_BYTES);
+  if (typeof request.schema !== "object" || request.schema === null || Array.isArray(request.schema)) {
+    throw new ModelReviewError("Model review schema must be a JSON Schema object.", {
+      code: "invalid_model_schema"
+    });
+  }
+  requireJsonSize(request.schema, "schema", MAX_SCHEMA_BYTES);
+  const maximumOutputTokens = request.budget?.maximumOutputTokens ?? DEFAULT_MAXIMUM_OUTPUT_TOKENS;
+  const timeoutMs = request.budget?.timeoutMs ?? DEFAULT_MODEL_TIMEOUT_MS;
+  requireIntegerRange(maximumOutputTokens, "budget.maximumOutputTokens", 1, MAX_MAXIMUM_OUTPUT_TOKENS);
+  requireIntegerRange(timeoutMs, "budget.timeoutMs", 1, MAX_MODEL_TIMEOUT_MS);
+  return {
+    prompt: request.prompt,
+    input: request.input,
+    schema: request.schema,
+    budget: { maximumOutputTokens, timeoutMs }
+  };
+}
+function requireJsonSize(value, name2, maximum) {
+  let encoded;
+  try {
+    encoded = JSON.stringify(value);
+  } catch (error) {
+    throw new ModelReviewError(`Model review ${name2} must be JSON-serializable: ${error instanceof Error ? error.message : String(error)}`, { code: "invalid_model_request" });
+  }
+  if (encoded === void 0) {
+    throw new ModelReviewError(`Model review ${name2} must be JSON-serializable.`, {
+      code: "invalid_model_request"
+    });
+  }
+  if (Buffer.byteLength(encoded, "utf8") > maximum) {
+    throw new ModelReviewError(`Model review ${name2} exceeds ${maximum} bytes.`, {
+      code: "model_request_too_large"
+    });
+  }
+}
+function requireIntegerRange(value, name2, minimum, maximum) {
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new ModelReviewError(`${name2} must be an integer from ${minimum} through ${maximum}.`, {
+      code: "invalid_model_budget"
+    });
+  }
+}
+async function readBoundedResponse(response) {
+  const declared = response.headers.get("content-length");
+  if (declared !== null && Number(declared) > MAX_RESPONSE_BYTES) {
+    throw new ModelReviewError(`Model broker response exceeds ${MAX_RESPONSE_BYTES} bytes.`, {
+      code: "model_response_too_large"
+    });
+  }
+  if (response.body === null) {
+    return "";
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (; ; ) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    size += value.byteLength;
+    if (size > MAX_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new ModelReviewError(`Model broker response exceeds ${MAX_RESPONSE_BYTES} bytes.`, {
+        code: "model_response_too_large"
+      });
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
+function requireBrokerResponse(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ModelReviewError("Model broker response must be an object.", {
+      code: "invalid_broker_response"
+    });
+  }
+  const response = value;
+  if (response.protocolVersion !== ADVERSARY_MODEL_PROTOCOL_VERSION) {
+    throw new ModelReviewError(`Model broker protocol version must be ${ADVERSARY_MODEL_PROTOCOL_VERSION}.`, { code: "unsupported_model_protocol" });
+  }
+  if (typeof response.provider !== "string" || response.provider.trim() === "") {
+    throw new ModelReviewError("Model broker response provider must be a non-empty string.", {
+      code: "invalid_broker_response"
+    });
+  }
+  if (typeof response.model !== "string" || response.model.trim() === "") {
+    throw new ModelReviewError("Model broker response model must be a non-empty string.", {
+      code: "invalid_broker_response"
+    });
+  }
+  if (!Object.hasOwn(response, "output")) {
+    throw new ModelReviewError("Model broker response is missing output.", {
+      code: "invalid_broker_response"
+    });
+  }
+  if (response.usage !== void 0) {
+    validateUsage(response.usage);
+  }
+  return response;
+}
+function validateUsage(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ModelReviewError("Model broker response usage must be an object.", {
+      code: "invalid_broker_response"
+    });
+  }
+  for (const field of ["inputTokens", "outputTokens"]) {
+    const count = value[field];
+    if (count !== void 0 && (!Number.isInteger(count) || count < 0)) {
+      throw new ModelReviewError(`Model broker response usage.${field} must be a non-negative integer.`, {
+        code: "invalid_broker_response"
+      });
+    }
+  }
+}
+function validateModelOutput(schema, output) {
+  const ajv = new import__.Ajv2020({ allErrors: true, strict: true });
+  let validate;
+  try {
+    validate = ajv.compile(schema);
+  } catch (error) {
+    throw new ModelReviewError(`Model review schema is invalid: ${error instanceof Error ? error.message : String(error)}`, { code: "invalid_model_schema" });
+  }
+  if (!validate(output)) {
+    const detail = ajv.errorsText(validate.errors, { separator: "; " });
+    throw new ModelReviewError(`Model output does not match the requested schema: ${detail}`, {
+      code: "invalid_model_output"
+    });
+  }
+}
 
 // node_modules/@adversarylabs/sdk/dist/manifest.js
 var import_yaml = __toESM(require_dist(), 1);
@@ -14655,7 +14944,7 @@ var Adversary = class {
     const collector = createReviewCollector();
     const registry = this.ruleDefinitions.snapshot();
     const change = normalizeChangeContext(options.input.change);
-    const context = createRuleContext(repoPath, change, summary, cache, collector, registry);
+    const context = createRuleContext(repoPath, change, summary, cache, collector, registry, options.model ?? unavailableModel());
     const includeSuppressed = options.includeSuppressed;
     for (const rule of this.rules) {
       log.debug(`running rule ${rule.id}`);
@@ -14680,6 +14969,7 @@ var Adversary = class {
     const repository = options.input ? input.source.path : process.env.ADVERSARY_REPO ?? input.source.path;
     const result = await this.run({
       input: { ...input, source: { ...input.source, path: repository } },
+      model: options.model ?? createModelFromEnvironment(),
       review: options.review,
       includeSuppressed: options.includeSuppressed ?? parseBooleanEnv(process.env.ADVERSARY_INCLUDE_SUPPRESSED),
       includeRawObservations: options.includeRawObservations,
@@ -14790,7 +15080,7 @@ async function validateRunEnvelope(output) {
   let validator = envelopeValidator;
   if (validator === void 0) {
     const schema = JSON.parse(await readFile(new URL("../schemas/adversary.review.v1.schema.json", import.meta.url), "utf8"));
-    validator = new import__.Ajv2020({ allErrors: true, strict: true }).compile(schema);
+    validator = new import__2.Ajv2020({ allErrors: true, strict: true }).compile(schema);
     envelopeValidator = validator;
   }
   if (!validator(output)) {
@@ -14846,13 +15136,14 @@ function normalizeChangeContext(change) {
     worktree: change.head_ref === WORKTREE_HEAD_REF
   });
 }
-function createRuleContext(repoPath, change, summary, cache, collector, registry) {
+function createRuleContext(repoPath, change, summary, cache, collector, registry, model) {
   const absoluteRepoPath = resolve(repoPath);
   return {
     repoPath: absoluteRepoPath,
     change,
     summary,
     cache,
+    model,
     relpath(path) {
       return relative(absoluteRepoPath, isAbsolute(path) ? path : resolve(absoluteRepoPath, path));
     },
@@ -20273,6 +20564,283 @@ function parseNameStatus(output) {
   });
 }
 
+// src/model-review.ts
+var MAX_MODEL_FILES = 16;
+var MAX_FILE_CHARS = 6e3;
+var MAX_DETERMINISTIC_SIGNALS = 40;
+var MAX_MODEL_OBSERVATIONS = 8;
+var GO_CLI_MODEL_PROMPT = `You are reviewing a Go command-line application change for CLI contract quality.
+
+Focus only on Go CLI engineering that affects users of the CLI:
+- command and subcommand behavior
+- flags, arguments, defaults, and precedence
+- exit codes and stdout/stderr contracts
+- interactive versus non-interactive behavior
+- cancellation and signal handling
+- configuration compatibility
+- error behavior and actionable diagnostics
+- scripting and automation compatibility
+- completion of related CLI code paths
+
+Do NOT review generic Go style, broad security, observability, databases, or general engineering quality unless it directly breaks the CLI contract.
+
+Use only the prepared evidence and source excerpts. Cite evidence with the provided evidence IDs.
+Return a small number of high-confidence observations (zero is valid). Prefer severity that matches user impact.`;
+var GO_CLI_MODEL_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["assessment", "ship", "observations"],
+  properties: {
+    assessment: {
+      type: "object",
+      additionalProperties: false,
+      required: ["risk", "summary"],
+      properties: {
+        risk: {
+          type: "string",
+          enum: ["none", "low", "medium", "high", "critical"]
+        },
+        summary: { type: "string", minLength: 1, maxLength: 800 }
+      }
+    },
+    ship: { type: "boolean" },
+    primaryConcern: { type: "string", minLength: 1, maxLength: 240 },
+    observations: {
+      type: "array",
+      maxItems: MAX_MODEL_OBSERVATIONS,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "id",
+          "title",
+          "category",
+          "severity",
+          "confidence",
+          "summary",
+          "whyItMatters",
+          "recommendation",
+          "evidenceIds"
+        ],
+        properties: {
+          id: { type: "string", minLength: 1, maxLength: 64 },
+          title: { type: "string", minLength: 1, maxLength: 160 },
+          category: {
+            type: "string",
+            enum: [
+              "command-behavior",
+              "flags-args",
+              "exit-codes",
+              "stdout-stderr",
+              "interactive",
+              "cancellation",
+              "configuration",
+              "errors",
+              "automation",
+              "completeness"
+            ]
+          },
+          severity: {
+            type: "string",
+            enum: ["low", "medium", "high", "critical"]
+          },
+          confidence: {
+            type: "string",
+            enum: ["medium", "high"]
+          },
+          summary: { type: "string", minLength: 1, maxLength: 500 },
+          whyItMatters: { type: "string", minLength: 1, maxLength: 500 },
+          recommendation: { type: "string", minLength: 1, maxLength: 500 },
+          evidenceIds: {
+            type: "array",
+            minItems: 1,
+            maxItems: 8,
+            items: { type: "string", minLength: 1, maxLength: 96 }
+          }
+        }
+      }
+    }
+  }
+};
+function prepareModelInputFromDiscovery(change, analysis, files) {
+  const evidenceCatalog = [];
+  const deterministicSignals = analysis.signals.slice().sort(
+    (left, right) => left.path.localeCompare(right.path) || left.line - right.line || left.ruleId.localeCompare(right.ruleId)
+  ).slice(0, MAX_DETERMINISTIC_SIGNALS).map((signal) => {
+    const id = evidenceIdForSignal(signal);
+    evidenceCatalog.push({
+      id,
+      kind: "deterministic",
+      path: signal.path,
+      line: signal.line,
+      message: signal.message,
+      snippet: signal.snippet.slice(0, 300)
+    });
+    return {
+      id,
+      ruleId: signal.ruleId,
+      path: signal.path,
+      line: signal.line,
+      message: signal.message,
+      snippet: signal.snippet.slice(0, 300)
+    };
+  });
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  const pathOrder = prioritizePaths(
+    [
+      ...analysis.signals.map((signal) => signal.path),
+      ...change?.changedFiles ?? [],
+      ...files.map((file) => file.path)
+    ],
+    change?.changedFiles ?? []
+  );
+  const sources = [];
+  for (const path of pathOrder) {
+    if (sources.length >= MAX_MODEL_FILES) break;
+    const file = byPath.get(path);
+    if (file === void 0) continue;
+    const truncated = file.current.length > MAX_FILE_CHARS;
+    const content = truncated ? `${file.current.slice(0, MAX_FILE_CHARS)}
+/* truncated */
+` : file.current;
+    const id = `file:${path}`;
+    sources.push({
+      id,
+      path,
+      status: file.status,
+      content,
+      truncated
+    });
+    evidenceCatalog.push({
+      id,
+      kind: "source",
+      path,
+      message: `Prepared source excerpt for ${path}`,
+      snippet: content.split("\n").slice(0, 3).join("\n").slice(0, 300)
+    });
+  }
+  return {
+    domain: "go-cli",
+    change: {
+      scanMode: change === null ? "repository" : change.scanMode,
+      ...change?.baseRef === void 0 ? {} : { baseRef: change.baseRef },
+      ...change?.headRef === void 0 ? {} : { headRef: change.headRef },
+      ...change === null ? {} : { worktree: change.worktree },
+      changedFiles: [...change?.changedFiles ?? []].slice(0, 100)
+    },
+    deterministicSignals,
+    sources,
+    evidenceCatalog
+  };
+}
+function buildModelReviewRequestFromDiscovery(change, analysis, files) {
+  const input = prepareModelInputFromDiscovery(change, analysis, files);
+  const evidenceById = new Map(input.evidenceCatalog.map((item) => [item.id, item]));
+  return {
+    input,
+    evidenceById,
+    request: {
+      prompt: GO_CLI_MODEL_PROMPT,
+      input,
+      schema: GO_CLI_MODEL_SCHEMA,
+      budget: {
+        maximumOutputTokens: 4096,
+        timeoutMs: 12e4
+      }
+    }
+  };
+}
+function applyModelCliReview(ctx, output, evidenceById) {
+  ctx.review.assessment({
+    risk: output.assessment.risk,
+    summary: output.assessment.summary
+  });
+  const concern = output.primaryConcern?.trim() || output.observations.slice().sort(
+    (left, right) => severityRank(right.severity) - severityRank(left.severity) || left.id.localeCompare(right.id)
+  )[0]?.title;
+  ctx.review.opinion(
+    formatOpinion({
+      ship: output.ship,
+      ...concern === void 0 || concern === "" ? {} : { concern },
+      change: ctx.change
+    })
+  );
+  for (const observation of output.observations.slice(0, MAX_MODEL_OBSERVATIONS)) {
+    const evidence = observation.evidenceIds.map((id) => evidenceById.get(id)).filter((item) => item !== void 0).slice(0, 8).map((item) => ({
+      location: {
+        file: item.path,
+        ...item.line === void 0 ? {} : { line: item.line }
+      },
+      message: item.message,
+      snippet: item.snippet
+    }));
+    ctx.review.observe({
+      key: `go-cli.model.${observation.id}`,
+      summary: `[${observation.severity}/${observation.confidence}] ${observation.title}: ${observation.summary}`,
+      ...evidence.length === 0 ? {} : { evidence },
+      metadata: {
+        source: "model",
+        category: observation.category,
+        severity: observation.severity,
+        confidence: observation.confidence,
+        whyItMatters: observation.whyItMatters,
+        recommendation: observation.recommendation,
+        evidenceIds: observation.evidenceIds
+      }
+    });
+  }
+}
+async function runModelCliReview(ctx, analysis, files) {
+  const { request, evidenceById } = buildModelReviewRequestFromDiscovery(
+    ctx.change,
+    analysis,
+    files
+  );
+  try {
+    const result = await ctx.model.review(request);
+    applyModelCliReview(ctx, result.output, evidenceById);
+    return "applied";
+  } catch (error) {
+    if (error instanceof ModelUnavailableError) {
+      return "unavailable";
+    }
+    throw error;
+  }
+}
+function evidenceIdForSignal(signal) {
+  return `det:${signal.ruleId}:${signal.path}:${signal.line}`;
+}
+function prioritizePaths(paths, changedFiles) {
+  const changed2 = new Set(changedFiles);
+  const unique = [...new Set(paths.filter((path) => path.length > 0))];
+  return unique.sort((left, right) => {
+    const leftChanged = changed2.has(left) ? 0 : 1;
+    const rightChanged = changed2.has(right) ? 0 : 1;
+    if (leftChanged !== rightChanged) return leftChanged - rightChanged;
+    return pathPriority(left) - pathPriority(right) || left.localeCompare(right);
+  });
+}
+function pathPriority(path) {
+  const normalized = path.replaceAll("\\", "/");
+  if (/(^|\/)main\.go$/.test(normalized)) return 0;
+  if (/(^|\/)cmd\//.test(normalized) || /(^|\/)cli\//.test(normalized)) return 1;
+  if (/(^|\/)internal\/(cmd|cli|app|command)\//.test(normalized)) return 2;
+  if (/(^|\/)pkg\//.test(normalized) || /(^|\/)internal\//.test(normalized)) return 4;
+  return 3;
+}
+function severityRank(severity) {
+  switch (severity) {
+    case "critical":
+      return 4;
+    case "high":
+      return 3;
+    case "medium":
+      return 2;
+    case "low":
+      return 1;
+  }
+}
+
 // src/review.ts
 var RISK_ORDER = { none: 0, low: 1, medium: 2, high: 3, critical: 4 };
 var MAX_EVIDENCE_SAMPLES = 8;
@@ -20281,7 +20849,7 @@ var COMMAND_SCOPED_RULES = /* @__PURE__ */ new Set([
   "go-cli.cancellation",
   "go-cli.subprocess-no-context"
 ]);
-function reviewDomain(ctx, analysis) {
+async function reviewDomain(ctx, analysis, discoveryFiles = []) {
   const candidates = [];
   for (const rule of domain.rules) {
     const raw = analysis.signals.filter((signal) => signal.ruleId === rule.id);
@@ -20322,7 +20890,15 @@ function reviewDomain(ctx, analysis) {
       }
     });
   }
-  addPositives(ctx, analysis, active.map((item) => item.rule.id));
+  addPositives(
+    ctx,
+    analysis,
+    active.map((item) => item.rule.id)
+  );
+  const modelStatus = await runModelCliReview(ctx, analysis, discoveryFiles);
+  if (modelStatus === "applied") {
+    return;
+  }
   if (active.length === 0) {
     ctx.review.assessment({ risk: "none", summary: domain.noRiskSummary });
     ctx.review.opinion({ ship: true, summary: domain.approvalSummary });
@@ -20350,14 +20926,14 @@ function selectSignals(ruleId, signals) {
     }
   }
   const sorted = [...pool].sort(
-    (left, right) => pathPriority(left.path) - pathPriority(right.path) || left.path.localeCompare(right.path) || left.line - right.line
+    (left, right) => pathPriority2(left.path) - pathPriority2(right.path) || left.path.localeCompare(right.path) || left.line - right.line
   );
   return {
     total: pool.length,
     samples: sorted.slice(0, MAX_EVIDENCE_SAMPLES)
   };
 }
-function pathPriority(path) {
+function pathPriority2(path) {
   const normalized = path.replaceAll("\\", "/");
   if (/(^|\/)main\.go$/.test(normalized)) return 0;
   if (/(^|\/)cmd\//.test(normalized) || /(^|\/)cli\//.test(normalized)) return 1;
@@ -20366,7 +20942,7 @@ function pathPriority(path) {
   return 3;
 }
 function isCommandPath(path) {
-  return pathPriority(path) <= 2;
+  return pathPriority2(path) <= 2;
 }
 function assessmentSummary(active) {
   if (active.length === 1) {
@@ -20420,7 +20996,7 @@ function positiveSummary(base, count) {
 function createApp() {
   const app = new Adversary({
     name: domain.name,
-    version: "0.0.1",
+    version: "0.0.2",
     // Domain already ranks and caps findings; keep SDK cap aligned.
     review: { maximumFindings: 3, minimumConfidence: "medium" }
   });
@@ -20440,7 +21016,15 @@ function createApp() {
         }
       });
     }
-    reviewDomain(ctx, analysis);
+    await reviewDomain(
+      ctx,
+      analysis,
+      discovery.files.map((file) => ({
+        path: file.path,
+        current: file.current,
+        status: file.status
+      }))
+    );
   });
   return app;
 }
