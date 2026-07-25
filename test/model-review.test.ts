@@ -18,12 +18,48 @@ import {
 
 type CapturingModel = ReviewModel & { requests: ModelReviewRequest[] };
 
+function isConcernRewriteRequest(request: ModelReviewRequest): boolean {
+  const schema = request.schema as {
+    required?: string[];
+    properties?: Record<string, unknown>;
+  };
+  return (
+    Array.isArray(schema.required) &&
+    schema.required.includes("concern") &&
+    schema.properties !== undefined &&
+    "concern" in schema.properties
+  );
+}
+
+/** Deterministic noun phrases for concern-rewrite broker calls in tests. */
+function fixtureConcernRewrite(text: string): string {
+  if (/exit code 124|os\.Exit\(124\)/i.test(text)) return "forced exit code 124";
+  if (/silently\s+no-?op|no-?op for v1/i.test(text)) return "silent no-op v1 paths";
+  if (/discard|inherited context|cancellation/i.test(text)) {
+    return "inherited context in command handlers";
+  }
+  if (/flag default|incompatib/i.test(text)) return "incompatible flag default changes";
+  if (/stdout|stderr|progress mixed/i.test(text)) return "stdout and stderr contract violations";
+  if (/incomplete|unfinished/i.test(text)) return "incomplete command implementation";
+  return "incorrect command behavior";
+}
+
 function capturingModel(output: ModelCliReview): CapturingModel {
   const requests: ModelReviewRequest[] = [];
   return {
     requests,
     async review<T>(request: ModelReviewRequest) {
       requests.push(request);
+      if (isConcernRewriteRequest(request)) {
+        const text = String(
+          (request.input as { text?: string } | undefined)?.text ?? "",
+        );
+        return {
+          output: { concern: fixtureConcernRewrite(text) } as T,
+          provider: "fixture",
+          model: "go-cli-concern-rewrite",
+        };
+      }
       return {
         output: output as T,
         provider: "fixture",
@@ -482,14 +518,18 @@ func run() error { return nil }
 
   const result = await runWithModel(root, model);
   assert.equal(result.opinion?.ship, false);
-  // Title "… forces exit code 124 …" becomes a noun phrase; dotted identifiers are not used.
+  // Title rewritten via ctx.model.concern (SDK → broker) into a noun phrase.
   assert.match(result.opinion?.summary ?? "", /I would address forced exit code 124/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /overrides the normal exit-code path/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /exit 1/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
+  assert.ok(
+    model.requests.some((request) => isConcernRewriteRequest(request)),
+    "invalid titles should trigger a concern rewrite model call",
+  );
 });
 
-test("opinion rewrites silent no-op headlines into noun phrases", async () => {
+test("opinion rewrites silent no-op headlines via model.concern", async () => {
   const root = await writeCliFixture("silent-noop-title", {
     "cmd/api.go": `package main
 
@@ -523,4 +563,5 @@ func run() error { return nil }
   assert.match(result.opinion?.summary ?? "", /I would address silent no-op v1 paths/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /get\/post\/patch\/put/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
+  assert.ok(model.requests.some((request) => isConcernRewriteRequest(request)));
 });
