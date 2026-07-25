@@ -20585,7 +20585,10 @@ Focus only on Go CLI engineering that affects users of the CLI:
 Do NOT review generic Go style, broad security, observability, databases, or general engineering quality unless it directly breaks the CLI contract.
 
 Use only the prepared evidence and source excerpts. Cite evidence with the provided evidence IDs.
-Return a small number of high-confidence observations (zero is valid). Prefer severity that matches user impact.`;
+Return a small number of high-confidence observations (zero is valid). Prefer severity that matches user impact.
+
+For each observation.title use a short headline. Prefer noun phrases when possible.
+If you set primaryConcern, it must be a short noun phrase (for example "forced exit code 124"), never a full sentence.`;
 var GO_CLI_MODEL_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -20604,7 +20607,7 @@ var GO_CLI_MODEL_SCHEMA = {
       }
     },
     ship: { type: "boolean" },
-    primaryConcern: { type: "string", minLength: 1, maxLength: 240 },
+    primaryConcern: { type: "string", minLength: 1, maxLength: 120 },
     observations: {
       type: "array",
       maxItems: MAX_MODEL_OBSERVATIONS,
@@ -20764,9 +20767,7 @@ function applyModelCliReview(ctx, output, evidenceById, staticSeverities = []) {
   const rankedObservations = output.observations.slice().sort(
     (left, right) => severityRank(right.severity) - severityRank(left.severity) || left.id.localeCompare(right.id)
   );
-  const concern = shortConcern(
-    output.primaryConcern?.trim() || rankedObservations[0]?.title
-  );
+  const concern = opinionConcernFromTitle(rankedObservations[0]?.title);
   const blocking = staticSeverities.some((severity) => severityRank(severity) >= severityRank("medium")) || modelObservationSeverities.some((severity) => severityRank(severity) >= severityRank("medium"));
   const ship = output.ship && !blocking;
   ctx.review.opinion(
@@ -20853,13 +20854,23 @@ function severityRank(severity) {
       return 0;
   }
 }
-function shortConcern(value) {
-  if (value === void 0) return void 0;
-  const normalized = value.trim().replace(/\s+/g, " ");
+function opinionConcernFromTitle(title) {
+  if (title === void 0) return void 0;
+  const normalized = title.trim().replace(/\s+/g, " ");
   if (normalized === "") return void 0;
+  const codeSubject = normalized.match(
+    /^(.{3,90}?(?:\([^)]*\)|os\.Exit|context\.\w+|exec\.\w+|cmd\.\w+))\s+(?:forces?|overrides?|causes?|prevents?|blocks?|breaks?)\b/i
+  );
+  if (codeSubject?.[1] !== void 0) {
+    return codeSubject[1].trim().replace(/[.!?,:;]+$/g, "");
+  }
   const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] ?? normalized;
-  const clipped = firstSentence.length > 120 ? `${firstSentence.slice(0, 117).trimEnd()}...` : firstSentence;
-  return clipped.replace(/[.!?]+$/g, "").trim();
+  const cleaned = firstSentence.replace(/[.!?]+$/g, "").trim();
+  const words = cleaned.split(/\s+/);
+  if (words.length <= 10 && cleaned.length <= 90) {
+    return cleaned;
+  }
+  return words.slice(0, 8).join(" ");
 }
 function maxSeverity(values) {
   let best = "none";
