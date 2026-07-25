@@ -15510,12 +15510,37 @@ function resolveReviewPosture(change) {
   }
   return "change";
 }
-function normalizeOpinionConcern(concern) {
-  const normalized = lowercaseFirst(trimTrailingSentencePunctuation(normalizeParagraph(concern)));
-  if (!isNonEmptyString(normalized)) {
-    throw new Error("opinion concern must be a non-empty string.");
+var MAX_OPINION_CONCERN_LENGTH = 100;
+function isOpinionConcernPhrase(concern) {
+  try {
+    requireOpinionConcern(concern);
+    return true;
+  } catch {
+    return false;
   }
-  return concernClause(normalized);
+}
+function requireOpinionConcern(concern, label = "opinion concern") {
+  if (typeof concern !== "string") {
+    throw new Error(`${label} must be a string.`);
+  }
+  const trimmed = concern.trim();
+  if (trimmed === "") {
+    throw new Error(`${label} must be a non-empty noun phrase suitable after "address \u2026" (for example "direct process termination").`);
+  }
+  if (/[.!?]/.test(trimmed)) {
+    throw new Error(`${label} must be a noun phrase, not a sentence (remove ".!?").`);
+  }
+  const normalized = lowercaseFirst(normalizeParagraph(trimmed));
+  if (!isNonEmptyString(normalized)) {
+    throw new Error(`${label} must be a non-empty noun phrase suitable after "address \u2026" (for example "direct process termination").`);
+  }
+  if (normalized.length > MAX_OPINION_CONCERN_LENGTH) {
+    throw new Error(`${label} must be at most ${MAX_OPINION_CONCERN_LENGTH} characters (got ${normalized.length}).`);
+  }
+  if (looksLikeFiniteClause(normalized)) {
+    throw new Error(`${label} must be a noun phrase (for example "direct process termination"), not a clause (for example "commands replace inherited context").`);
+  }
+  return normalized;
 }
 function formatOpinion(options) {
   if (typeof options.ship !== "boolean") {
@@ -15530,7 +15555,7 @@ function formatOpinion(options) {
       summary: `I would address the remaining findings ${deadline}.`
     };
   }
-  const concern = options.concern === void 0 || options.concern.trim() === "" ? void 0 : normalizeOpinionConcern(options.concern);
+  const concern = options.concern === void 0 || options.concern.trim() === "" ? void 0 : requireOpinionConcern(options.concern, "formatOpinion concern");
   if (options.ship) {
     if (concern === void 0) {
       return { ship: true, summary: opinionApproveAsIs(posture) };
@@ -15550,6 +15575,15 @@ function formatOpinion(options) {
     ship: false,
     summary: `I would address ${concern} ${deadline}.`
   };
+}
+function looksLikeFiniteClause(concern) {
+  if (/\b(?:allows|are|binds|blocks|builds|bypasses|calls|can|closes|contains|copies|could|creates|detaches|did|discards|do|does|exits|exposes|fails|forks|has|have|ignores|includes|installs|is|kills|lacks|leaks|leaves|logs|maps|may|might|must|opens|panics|prints|reads|references|relies|replaces|requires|returns|runs|skips|spawns|starts|terminates|throws|uses|was|were|writes)\b\s+\S+/i.test(concern)) {
+    return true;
+  }
+  if (/(?:^|\s)(?:replace|replaces|discard|discards|force|forces|override|overrides|cause|causes|prevent|prevents|block|blocks|break|breaks|succeed|succeeds|fail|fails|mix|mixes|omit|omits|ignore|ignores)\s+\S+/i.test(concern)) {
+    return true;
+  }
+  return false;
 }
 function parseReviewPosture(value, label) {
   if (value === "repository" || value === "change" || value === "worktree") {
@@ -20767,9 +20801,13 @@ function applyModelCliReview(ctx, output, evidenceById, staticSeverities = []) {
   const rankedObservations = output.observations.slice().sort(
     (left, right) => severityRank(right.severity) - severityRank(left.severity) || left.id.localeCompare(right.id)
   );
-  const concern = opinionConcernFromTitle(rankedObservations[0]?.title);
   const blocking = staticSeverities.some((severity) => severityRank(severity) >= severityRank("medium")) || modelObservationSeverities.some((severity) => severityRank(severity) >= severityRank("medium"));
   const ship = output.ship && !blocking;
+  const concern = resolveOpinionConcern([
+    rankedObservations[0]?.title,
+    output.primaryConcern,
+    rankedObservations[0] === void 0 ? void 0 : categoryConcern(rankedObservations[0].category)
+  ]);
   ctx.review.opinion(
     formatOpinion({
       ship,
@@ -20854,23 +20892,72 @@ function severityRank(severity) {
       return 0;
   }
 }
-function opinionConcernFromTitle(title) {
-  if (title === void 0) return void 0;
-  const normalized = title.trim().replace(/\s+/g, " ");
-  if (normalized === "") return void 0;
-  const codeSubject = normalized.match(
-    /^(.{3,90}?(?:\([^)]*\)|os\.Exit|context\.\w+|exec\.\w+|cmd\.\w+))\s+(?:forces?|overrides?|causes?|prevents?|blocks?|breaks?)\b/i
+function resolveOpinionConcern(candidates) {
+  for (const candidate of candidates) {
+    if (candidate === void 0) continue;
+    for (const derived of deriveConcernCandidates(candidate)) {
+      if (isOpinionConcernPhrase(derived)) {
+        return requireOpinionConcern(derived);
+      }
+    }
+  }
+  return void 0;
+}
+function deriveConcernCandidates(raw) {
+  const normalized = raw.trim().replace(/\s+/g, " ");
+  if (normalized === "") return [];
+  const out2 = [];
+  const push = (value) => {
+    const cleaned = value?.trim().replace(/[.!?,:;]+$/g, "");
+    if (cleaned && !/[.!?]/.test(cleaned) && !out2.includes(cleaned)) {
+      out2.push(cleaned);
+    }
+  };
+  const forcedCode = normalized.match(
+    /\b(?:forces?|overrides?|causes?)\s+((?:an?\s+|the\s+)?(?:exit\s+)?code\s+\d+)\b/i
   );
-  if (codeSubject?.[1] !== void 0) {
-    return codeSubject[1].trim().replace(/[.!?,:;]+$/g, "");
+  if (forcedCode?.[1] !== void 0) {
+    const code = forcedCode[1].replace(/^(an?|the)\s+/i, "").trim();
+    push(`forced ${code}`);
+  }
+  const replaceShape = normalized.match(
+    /^(?:commands?|handlers?|paths?)\s+(?:replace|discard|use|start with)\s+(.+?)(?:\s*,|\s+with\b|\s+instead\b|$)/i
+  );
+  if (replaceShape?.[1] !== void 0) {
+    push(`${replaceShape[1].trim()} in command handlers`);
   }
   const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] ?? normalized;
-  const cleaned = firstSentence.replace(/[.!?]+$/g, "").trim();
-  const words = cleaned.split(/\s+/);
-  if (words.length <= 10 && cleaned.length <= 90) {
-    return cleaned;
+  push(firstSentence.replace(/[.!?]+$/g, "").trim());
+  const words = firstSentence.replace(/[.!?]+$/g, "").trim().split(/\s+/).filter((word) => !/[.!?]/.test(word));
+  push(words.slice(0, 6).join(" "));
+  return out2;
+}
+function categoryConcern(category) {
+  switch (category) {
+    case "cancellation":
+      return "broken command cancellation context";
+    case "exit-codes":
+      return "incorrect process exit-code handling";
+    case "stdout-stderr":
+      return "stdout and stderr contract violations";
+    case "flags-args":
+      return "incompatible flag or argument defaults";
+    case "subprocess":
+    case "automation":
+      return "subprocesses that ignore cancellation";
+    case "completeness":
+      return "incomplete command implementation";
+    case "errors":
+      return "non-actionable command error behavior";
+    case "configuration":
+      return "configuration compatibility issues";
+    case "command-behavior":
+      return "incorrect command behavior";
+    case "interactive":
+      return "interactive versus non-interactive contract issues";
+    default:
+      return void 0;
   }
-  return words.slice(0, 8).join(" ");
 }
 function maxSeverity(values) {
   let best = "none";
@@ -20954,7 +21041,7 @@ async function reviewDomain(ctx, analysis, discoveryFiles = []) {
   ctx.review.opinion(
     formatOpinion({
       ship: primary.rule.severity === "low",
-      concern: primary.rule.concern,
+      concern: requireOpinionConcern(primary.rule.concern),
       change: ctx.change
     })
   );

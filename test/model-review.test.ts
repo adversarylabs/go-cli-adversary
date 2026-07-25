@@ -404,8 +404,11 @@ func run() {
   assert.equal(result.assessment?.risk, "high", "risk must be max(static high, model)");
   assert.match(result.opinion?.summary ?? "", /before shipping|before merging|before committing/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
-  // Concern comes from observation title (noun phrase), not free-form primaryConcern.
-  assert.match(result.opinion?.summary ?? "", /Commands discard inherited context/i);
+  // Static high (os.Exit) outranks model medium: opinion follows the risk driver.
+  assert.match(
+    result.opinion?.summary ?? "",
+    /I would address direct process termination below the application boundary/i,
+  );
   assert.doesNotMatch(
     result.opinion?.summary ?? "",
     /cancellation is broken across most commands/i,
@@ -479,8 +482,45 @@ func run() error { return nil }
 
   const result = await runWithModel(root, model);
   assert.equal(result.opinion?.ship, false);
-  assert.match(result.opinion?.summary ?? "", /defer os\.Exit\(124\)/);
+  // Title "… forces exit code 124 …" becomes a noun phrase; dotted identifiers are not used.
+  assert.match(result.opinion?.summary ?? "", /I would address forced exit code 124/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /overrides the normal exit-code path/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /exit 1/i);
+  assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
+});
+
+test("opinion rewrites silent no-op headlines into noun phrases", async () => {
+  const root = await writeCliFixture("silent-noop-title", {
+    "cmd/api.go": `package main
+
+func run() error { return nil }
+`,
+  });
+  const model = capturingModel({
+    assessment: {
+      risk: "medium",
+      summary: "The api verb silently no-ops for v1 paths.",
+    },
+    ship: false,
+    primaryConcern: "api get/post/patch/put silently no-op for v1 paths",
+    observations: [
+      {
+        id: "api-v1",
+        title: "api get/post/patch/put silently no-op for v1 paths",
+        category: "command-behavior",
+        severity: "medium",
+        confidence: "high",
+        summary: "The v1 branch is empty so requests exit 0 with no output.",
+        whyItMatters: "Callers think the API call succeeded.",
+        recommendation: "Implement v1 or return a clear unsupported-path error.",
+        evidenceIds: ["file:cmd/api.go"],
+      },
+    ],
+  });
+
+  const result = await runWithModel(root, model);
+  assert.equal(result.opinion?.ship, false);
+  assert.match(result.opinion?.summary ?? "", /I would address silent no-op v1 paths/i);
+  assert.doesNotMatch(result.opinion?.summary ?? "", /get\/post\/patch\/put/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
 });

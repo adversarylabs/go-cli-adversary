@@ -1,4 +1,4 @@
-import { formatOpinion, type RuleContext } from "@adversarylabs/sdk";
+import { formatOpinion, requireOpinionConcern, type RuleContext } from "@adversarylabs/sdk";
 import { domain } from "./domain.js";
 import { runModelCliReview, type DiscoveryFile } from "./model-review.js";
 import { type Analysis, type RuleDefinition, type Signal } from "./types.js";
@@ -73,7 +73,14 @@ export async function reviewDomain(
   );
 
   const staticSeverities = active.map((item) => item.rule.severity);
-  const modelStatus = await runModelCliReview(ctx, analysis, discoveryFiles, staticSeverities);
+  const staticPrimaryConcern = active[0]?.rule.concern;
+  const modelStatus = await runModelCliReview(
+    ctx,
+    analysis,
+    discoveryFiles,
+    staticSeverities,
+    staticPrimaryConcern,
+  );
   if (modelStatus === "applied") {
     return;
   }
@@ -92,7 +99,7 @@ export async function reviewDomain(
   ctx.review.opinion(
     formatOpinion({
       ship: primary.rule.severity === "low",
-      concern: primary.rule.concern,
+      concern: requireOpinionConcern(primary.rule.concern),
       change: ctx.change,
     }),
   );

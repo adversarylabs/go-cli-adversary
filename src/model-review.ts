@@ -1,6 +1,8 @@
 import {
   formatOpinion,
+  isOpinionConcernPhrase,
   ModelUnavailableError,
+  requireOpinionConcern,
   type ChangeContext,
   type ModelReviewRequest,
   type RuleContext,
@@ -291,6 +293,7 @@ export function applyModelCliReview(
   output: ModelCliReview,
   evidenceById: Map<string, PreparedEvidenceItem>,
   staticSeverities: StaticSeverity[] = [],
+  staticPrimaryConcern?: string,
 ): void {
   const modelObservationSeverities = output.observations.map((item) => item.severity);
   const risk = maxSeverity([
@@ -308,16 +311,28 @@ export function applyModelCliReview(
     (left, right) =>
       severityRank(right.severity) - severityRank(left.severity) || left.id.localeCompare(right.id),
   );
-  // Opinion prose is "I would address <concern> before …". Use a short noun
-  // phrase derived from the top observation title only. Free-form primaryConcern
-  // is often a full clause and produces ungrammatical formatOpinion output.
-  const concern = opinionConcernFromTitle(rankedObservations[0]?.title);
-
   // Never advertise ship-as-is when static or model work still shows material issues.
   const blocking =
     staticSeverities.some((severity) => severityRank(severity) >= severityRank("medium")) ||
     modelObservationSeverities.some((severity) => severityRank(severity) >= severityRank("medium"));
   const ship = output.ship && !blocking;
+
+  // Opinion prose is "I would address <concern> before …". Only noun phrases pass SDK
+  // validation. Prefer the severest story so risk/opinion stay coherent (static high
+  // os.Exit should not lose to a medium model headline).
+  const topModel = rankedObservations[0];
+  const staticMax = maxSeverity(staticSeverities);
+  const modelMax = maxSeverity(modelObservationSeverities);
+  const modelCandidates = [
+    topModel?.title,
+    output.primaryConcern,
+    topModel === undefined ? undefined : categoryConcern(topModel.category),
+  ];
+  const staticCandidates = [staticPrimaryConcern];
+  const concern =
+    severityRank(staticMax) > severityRank(modelMax)
+      ? resolveOpinionConcern([...staticCandidates, ...modelCandidates])
+      : resolveOpinionConcern([...modelCandidates, ...staticCandidates]);
 
   ctx.review.opinion(
     formatOpinion({
@@ -363,6 +378,7 @@ export async function runModelCliReview(
   analysis: Analysis,
   files: DiscoveryFile[],
   staticSeverities: StaticSeverity[] = [],
+  staticPrimaryConcern?: string,
 ): Promise<"applied" | "unavailable"> {
   const { request, evidenceById } = buildModelReviewRequestFromDiscovery(
     ctx.change,
@@ -371,7 +387,7 @@ export async function runModelCliReview(
   );
   try {
     const result = await ctx.model.review<ModelCliReview>(request);
-    applyModelCliReview(ctx, result.output, evidenceById, staticSeverities);
+    applyModelCliReview(ctx, result.output, evidenceById, staticSeverities, staticPrimaryConcern);
     return "applied";
   } catch (error) {
     if (error instanceof ModelUnavailableError) {
@@ -421,29 +437,122 @@ function severityRank(severity: StaticSeverity | ModelCliObservation["severity"]
 }
 
 /**
- * Build a concern phrase for formatOpinion from an observation title.
- * Prefer a short headline; for "X forces/overrides Y" keep only the code-ish subject.
+ * Try candidates until one is a valid SDK noun-phrase concern.
+ * Derives short subjects from clause titles when possible.
  */
-function opinionConcernFromTitle(title: string | undefined): string | undefined {
-  if (title === undefined) return undefined;
-  const normalized = title.trim().replace(/\s+/g, " ");
-  if (normalized === "") return undefined;
+function resolveOpinionConcern(candidates: Array<string | undefined>): string | undefined {
+  for (const candidate of candidates) {
+    if (candidate === undefined) continue;
+    for (const derived of deriveConcernCandidates(candidate)) {
+      if (isOpinionConcernPhrase(derived)) {
+        return requireOpinionConcern(derived);
+      }
+    }
+  }
+  return undefined;
+}
 
-  // "defer os.Exit(124) forces exit code 124..." -> "defer os.Exit(124)"
-  const codeSubject = normalized.match(
-    /^(.{3,90}?(?:\([^)]*\)|os\.Exit|context\.\w+|exec\.\w+|cmd\.\w+))\s+(?:forces?|overrides?|causes?|prevents?|blocks?|breaks?)\b/i,
+function deriveConcernCandidates(raw: string): string[] {
+  const normalized = raw.trim().replace(/\s+/g, " ");
+  if (normalized === "") return [];
+  const out: string[] = [];
+  const push = (value: string | undefined, opts?: { allowHeadline?: boolean }) => {
+    // SDK rejects ".!?" anywhere (so identifiers like os.Exit cannot be concerns).
+    const cleaned = value?.trim().replace(/[.!?,:;]+$/g, "");
+    if (!cleaned || /[.!?]/.test(cleaned) || out.includes(cleaned)) return;
+    // Raw model headlines often pass SDK noun-phrase checks but read poorly after
+    // "I would address …" (e.g. "api get/post/patch/put silently no-op for v1 paths").
+    if (!opts?.allowHeadline && looksLikeHeadlineNotNounPhrase(cleaned)) return;
+    out.push(cleaned);
+  };
+
+  // "… forces exit code 124 regardless …" -> "forced exit code 124"
+  const forcedCode = normalized.match(
+    /\b(?:forces?|overrides?|causes?)\s+((?:an?\s+|the\s+)?(?:exit\s+)?code\s+\d+)\b/i,
   );
-  if (codeSubject?.[1] !== undefined) {
-    return codeSubject[1].trim().replace(/[.!?,:;]+$/g, "");
+  if (forcedCode?.[1] !== undefined) {
+    const code = forcedCode[1].replace(/^(an?|the)\s+/i, "").trim();
+    push(`forced ${code}`, { allowHeadline: true });
   }
 
-  const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] ?? normalized;
-  const cleaned = firstSentence.replace(/[.!?]+$/g, "").trim();
-  const words = cleaned.split(/\s+/);
-  if (words.length <= 10 && cleaned.length <= 90) {
-    return cleaned;
+  // "api get/post/… silently no-op for v1 paths" -> "silent no-op v1 paths"
+  const silentNoop = normalized.match(
+    /\bsilently\s+no-?ops?\s+for\s+(.+?)(?:\s*,|\s+so\b|\s+without\b|$)/i,
+  );
+  if (silentNoop?.[1] !== undefined) {
+    push(`silent no-op ${silentNoop[1].trim()}`, { allowHeadline: true });
+  } else {
+    const noopFor = normalized.match(/\bno-?ops?\s+for\s+(.+?)(?:\s*,|\s+so\b|$)/i);
+    if (noopFor?.[1] !== undefined) {
+      push(`silent no-ops for ${noopFor[1].trim()}`, { allowHeadline: true });
+    }
   }
-  return words.slice(0, 8).join(" ");
+
+  // "Commands replace/discard inherited context with X" -> "inherited context in command handlers"
+  const replaceShape = normalized.match(
+    /^(?:commands?|handlers?|paths?)\s+(?:replace|discard|use|start with)\s+(.+?)(?:\s*,|\s+with\b|\s+instead\b|$)/i,
+  );
+  if (replaceShape?.[1] !== undefined) {
+    push(`${replaceShape[1].trim()} in command handlers`, { allowHeadline: true });
+  }
+
+  // Prefer short titles without sentence punctuation as-is (only if already noun-like).
+  const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] ?? normalized;
+  push(firstSentence.replace(/[.!?]+$/g, "").trim());
+
+  // Last resort: first few words without terminal punctuation or dotted identifiers.
+  const words = firstSentence
+    .replace(/[.!?]+$/g, "")
+    .trim()
+    .split(/\s+/)
+    .filter((word) => !/[.!?]/.test(word));
+  push(words.slice(0, 6).join(" "));
+
+  return out;
+}
+
+/** Headlines that SDK may accept but that are awkward after "I would address …". */
+function looksLikeHeadlineNotNounPhrase(concern: string): boolean {
+  // Slash-separated method/command lists: "api get/post/patch/put …"
+  if (/\/[a-z0-9_-]+(?:\/[a-z0-9_-]+)+/i.test(concern)) return true;
+  if (/(?:^|\s)(?:get|post|patch|put|delete)\/(?:get|post|patch|put|delete)/i.test(concern)) {
+    return true;
+  }
+  // Adverb + verb-ish "silently no-op" reads as a clause fragment, not a noun phrase.
+  if (/\bsilently\b/i.test(concern)) return true;
+  // Trailing participial clause after a comma.
+  if (/,/.test(concern)) return true;
+  // Too long to sit cleanly after "address".
+  if (concern.split(/\s+/).length > 10) return true;
+  return false;
+}
+
+function categoryConcern(category: string): string | undefined {
+  switch (category) {
+    case "cancellation":
+      return "broken command cancellation context";
+    case "exit-codes":
+      return "incorrect process exit-code handling";
+    case "stdout-stderr":
+      return "stdout and stderr contract violations";
+    case "flags-args":
+      return "incompatible flag or argument defaults";
+    case "subprocess":
+    case "automation":
+      return "subprocesses that ignore cancellation";
+    case "completeness":
+      return "incomplete command implementation";
+    case "errors":
+      return "non-actionable command error behavior";
+    case "configuration":
+      return "configuration compatibility issues";
+    case "command-behavior":
+      return "incorrect command behavior";
+    case "interactive":
+      return "interactive versus non-interactive contract issues";
+    default:
+      return undefined;
+  }
 }
 
 function maxSeverity(values: Array<StaticSeverity | ModelCliObservation["severity"]>): StaticSeverity {
