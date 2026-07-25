@@ -14540,6 +14540,7 @@ var DEFAULT_CONFIDENCE_THRESHOLDS = {
   medium: 0.6,
   high: 0.85
 };
+var WORKTREE_HEAD_REF = "WORKTREE";
 var RuleRegistry = class _RuleRegistry {
   rules = /* @__PURE__ */ new Map();
   register(rule) {
@@ -14653,7 +14654,8 @@ var Adversary = class {
     const cache = /* @__PURE__ */ new Map();
     const collector = createReviewCollector();
     const registry = this.ruleDefinitions.snapshot();
-    const context = createRuleContext(repoPath, summary, cache, collector, registry);
+    const change = normalizeChangeContext(options.input.change);
+    const context = createRuleContext(repoPath, change, summary, cache, collector, registry);
     const includeSuppressed = options.includeSuppressed;
     for (const rule of this.rules) {
       log.debug(`running rule ${rule.id}`);
@@ -14666,6 +14668,7 @@ var Adversary = class {
       collector,
       policy: cloneReviewPolicy({ ...this.reviewPolicy, ...options.review }),
       registry,
+      change,
       includeSuppressed,
       includeRawObservations: options.includeRawObservations,
       timing: options.includeTiming ? { totalMs: Math.round(performance.now() - startedAt) } : void 0
@@ -14756,6 +14759,25 @@ async function parseInput(path = DEFAULT_INPUT_PATH) {
   if (typeof parsed.source.path !== "string" || parsed.source.path.length === 0) {
     throw new Error(`Invalid input at ${path}: source.path must be a non-empty string.`);
   }
+  if (parsed.change !== void 0 && parsed.change !== null) {
+    if (!isRecord(parsed.change)) {
+      throw new Error(`Invalid input at ${path}: change must be an object or null.`);
+    }
+    for (const field of ["type", "base_ref", "head_ref", "scan_mode"]) {
+      const value = parsed.change[field];
+      if (value !== void 0 && typeof value !== "string") {
+        throw new Error(`Invalid input at ${path}: change.${field} must be a string.`);
+      }
+    }
+    const scanMode = parsed.change.scan_mode;
+    if (scanMode !== void 0 && scanMode !== "changed" && scanMode !== "all") {
+      throw new Error(`Invalid input at ${path}: change.scan_mode must be "changed" or "all".`);
+    }
+    const changedFiles = parsed.change.changed_files;
+    if (changedFiles !== void 0 && (!Array.isArray(changedFiles) || changedFiles.some((item) => typeof item !== "string"))) {
+      throw new Error(`Invalid input at ${path}: change.changed_files must be an array of strings.`);
+    }
+  }
   return parsed;
 }
 async function writeOutput(output, path = DEFAULT_OUTPUT_PATH) {
@@ -14807,10 +14829,28 @@ function rankFindings(findings) {
     return compareStrings(left.id, right.id);
   });
 }
-function createRuleContext(repoPath, summary, cache, collector, registry) {
+function normalizeChangeContext(change) {
+  if (change === void 0 || change === null) {
+    return null;
+  }
+  const scanMode = change.scan_mode ?? "changed";
+  if (scanMode !== "changed" && scanMode !== "all") {
+    throw new Error(`Unsupported change scan_mode "${change.scan_mode}".`);
+  }
+  return Object.freeze({
+    ...change.type === void 0 ? {} : { type: change.type },
+    ...change.base_ref === void 0 ? {} : { baseRef: change.base_ref },
+    ...change.head_ref === void 0 ? {} : { headRef: change.head_ref },
+    scanMode,
+    changedFiles: Object.freeze([...change.changed_files ?? []]),
+    worktree: change.head_ref === WORKTREE_HEAD_REF
+  });
+}
+function createRuleContext(repoPath, change, summary, cache, collector, registry) {
   const absoluteRepoPath = resolve(repoPath);
   return {
     repoPath: absoluteRepoPath,
+    change,
     summary,
     cache,
     relpath(path) {
@@ -14932,7 +14972,7 @@ function buildReviewResult(input) {
     positives,
     observations: reviewObservations,
     findings: eligible,
-    opinion: input.collector.opinion ?? synthesizeOpinion(eligible),
+    opinion: input.collector.opinion ?? synthesizeOpinion(eligible, input.change ?? null),
     suppressed: {
       observations: synthesis.suppressedObservations,
       findings: suppressedFindings.length
@@ -15160,7 +15200,7 @@ function assessmentConcern(finding) {
   return concernClause(lowercaseFirst(trimTrailingSentencePunctuation(summary ?? findingConcern(finding))));
 }
 function concernClause(concern) {
-  const isClause = /\b(?:allows|are|builds|can|contains|copies|could|did|do|does|exposes|has|have|includes|installs|is|lacks|may|might|must|reads|references|relies|requires|runs|uses|was|were|writes)\b/i.test(concern);
+  const isClause = /\b(?:allows|are|binds|blocks|builds|bypasses|calls|can|closes|contains|copies|could|creates|detaches|did|discards|do|does|exits|exposes|fails|forks|has|have|ignores|includes|installs|is|kills|lacks|leaks|leaves|logs|maps|may|might|must|opens|panics|prints|reads|references|relies|replaces|requires|returns|runs|skips|spawns|starts|terminates|throws|uses|was|were|writes)\b\s+\S+/i.test(concern);
   if (!isClause) {
     return concern;
   }
@@ -15170,26 +15210,120 @@ function concernClause(concern) {
 function joinSentences(...sentences) {
   return sentences.filter(isNonEmptyString).join(" ");
 }
-function synthesizeOpinion(findings) {
-  if (findings.length === 0) {
+function resolveReviewPosture(change) {
+  if (change === null || change === void 0 || change.scanMode === "all") {
+    return "repository";
+  }
+  if (change.worktree) {
+    return "worktree";
+  }
+  return "change";
+}
+function normalizeOpinionConcern(concern) {
+  const normalized = lowercaseFirst(trimTrailingSentencePunctuation(normalizeParagraph(concern)));
+  if (!isNonEmptyString(normalized)) {
+    throw new Error("opinion concern must be a non-empty string.");
+  }
+  return concernClause(normalized);
+}
+function formatOpinion(options) {
+  if (typeof options.ship !== "boolean") {
+    throw new Error("formatOpinion requires a boolean ship decision.");
+  }
+  const posture = options.posture === void 0 ? resolveReviewPosture(options.change ?? null) : parseReviewPosture(options.posture, "formatOpinion posture");
+  const deadline = opinionDeadline(posture);
+  const remainingCount = options.remainingCount ?? 0;
+  if (remainingCount > 1) {
+    return {
+      ship: options.ship,
+      summary: `I would address the remaining findings ${deadline}.`
+    };
+  }
+  const concern = options.concern === void 0 || options.concern.trim() === "" ? void 0 : normalizeOpinionConcern(options.concern);
+  if (options.ship) {
+    if (concern === void 0) {
+      return { ship: true, summary: opinionApproveAsIs(posture) };
+    }
     return {
       ship: true,
-      summary: "I would ship this as-is."
+      summary: opinionApproveWithFollowUp(posture, concern)
     };
+  }
+  if (concern === void 0) {
+    return {
+      ship: false,
+      summary: `I would address the remaining findings ${deadline}.`
+    };
+  }
+  return {
+    ship: false,
+    summary: `I would address ${concern} ${deadline}.`
+  };
+}
+function parseReviewPosture(value, label) {
+  if (value === "repository" || value === "change" || value === "worktree") {
+    return value;
+  }
+  throw new Error(`${label} must be one of repository, change, or worktree.`);
+}
+function opinionDeadline(posture) {
+  switch (posture) {
+    case "worktree":
+      return "before committing";
+    case "change":
+      return "before merging";
+    case "repository":
+      return "before shipping";
+    default: {
+      const _exhaustive = posture;
+      throw new Error(`unsupported review posture: ${String(_exhaustive)}`);
+    }
+  }
+}
+function opinionApproveAsIs(posture) {
+  switch (posture) {
+    case "worktree":
+      return "I would land these local changes as-is.";
+    case "change":
+      return "I would merge this change as-is.";
+    case "repository":
+      return "I would ship this as-is.";
+    default: {
+      const _exhaustive = posture;
+      throw new Error(`unsupported review posture: ${String(_exhaustive)}`);
+    }
+  }
+}
+function opinionApproveWithFollowUp(posture, concern) {
+  switch (posture) {
+    case "worktree":
+      return `I would land these local changes and address ${concern} as follow-up hardening.`;
+    case "change":
+      return `I would merge this change and address ${concern} as follow-up hardening.`;
+    case "repository":
+      return `I would ship this as-is. Addressing ${concern} is the only improvement I would recommend before shipping.`;
+    default: {
+      const _exhaustive = posture;
+      throw new Error(`unsupported review posture: ${String(_exhaustive)}`);
+    }
+  }
+}
+function synthesizeOpinion(findings, change) {
+  const posture = resolveReviewPosture(change);
+  const deadline = opinionDeadline(posture);
+  if (findings.length === 0) {
+    return formatOpinion({ ship: true, posture });
   }
   const highestSeverity = highestFindingSeverity(findings);
   const ship = severityWeight(highestSeverity) < severityWeight(Severity.High);
   if (findings.length > 1) {
-    return {
-      ship,
-      summary: "I would address the remaining findings before production."
-    };
+    return formatOpinion({ ship, remainingCount: findings.length, posture });
   }
   const finding = findings[0];
   const improvement = finding === void 0 ? "Addressing the finding" : improvementPhrase(finding);
   return {
     ship,
-    summary: ship ? `I would ship this as-is. ${improvement} is the only improvement I would recommend before production.` : `${improvement} is the most important improvement to address before production.`
+    summary: ship ? `${opinionApproveAsIs(posture)} ${improvement} is the only improvement I would recommend ${deadline}.` : `${improvement} is the most important improvement to address ${deadline}.`
   };
 }
 function deduplicateScores(scores) {
@@ -15830,6 +15964,7 @@ var domain = {
     {
       id: "go-cli.exit-bypass",
       title: "Command code terminates the process directly",
+      concern: "direct process termination below the application boundary",
       category: "correctness",
       severity: "high",
       confidence: "high",
@@ -15841,6 +15976,7 @@ var domain = {
     {
       id: "go-cli.execute-error",
       title: "The root command error is discarded",
+      concern: "discarded root command execution errors",
       category: "correctness",
       severity: "high",
       confidence: "high",
@@ -15852,6 +15988,7 @@ var domain = {
     {
       id: "go-cli.cancellation",
       title: "Long-running command work starts from a non-cancellable context",
+      concern: "non-cancellable context.Background in command work",
       category: "reliability",
       severity: "medium",
       confidence: "high",
@@ -19952,17 +20089,21 @@ var IGNORED_DIRECTORIES = /* @__PURE__ */ new Set([
 ]);
 var MAX_FILE_BYTES = 75e4;
 var MAX_FILES = 750;
-async function discoverSources(repoPath) {
+async function discoverSources(repoPath, change) {
   if (!await isGitRepository(repoPath) || !await revisionExists(repoPath, "HEAD")) {
     return { mode: "repository", files: await readSources(repoPath, await repositoryFiles(repoPath)) };
   }
-  const worktree = await gitOutput(repoPath, ["diff", "--name-status", "--find-renames", "HEAD", "--"]);
-  if (worktree.trim() !== "") return diffDiscovery(repoPath, "HEAD", worktree);
-  const base = await chooseBase(repoPath);
-  if (base !== void 0) {
-    const names = await gitOutput(repoPath, ["diff", "--name-status", "--find-renames", base, "HEAD", "--"]);
-    if (names.trim() !== "") return diffDiscovery(repoPath, base, names);
+  if (change !== null && change.scanMode === "changed" && change.baseRef !== void 0 && await revisionExists(repoPath, change.baseRef)) {
+    const head = change.worktree ? [] : ["HEAD"];
+    const names = await gitOutput(
+      repoPath,
+      ["diff", "--name-status", "--find-renames", change.baseRef, ...head, "--"]
+    );
+    return diffDiscovery(repoPath, change.baseRef, names);
   }
+  return trackedRepository(repoPath);
+}
+async function trackedRepository(repoPath) {
   const paths = (await gitOutput(repoPath, ["ls-files", "-z"])).split("\0").filter((path) => domain.includePath(path)).slice(0, MAX_FILES);
   return { mode: "repository", files: await readSources(repoPath, paths) };
 }
@@ -19980,15 +20121,6 @@ async function diffDiscovery(repoPath, base, names) {
     });
   }
   return { mode: "diff", base, files };
-}
-async function chooseBase(repoPath) {
-  for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
-    if (!await revisionExists(repoPath, candidate)) continue;
-    const mergeBase = (await gitOutput(repoPath, ["merge-base", "HEAD", candidate])).trim();
-    const head = (await gitOutput(repoPath, ["rev-parse", "HEAD"])).trim();
-    if (mergeBase !== "" && mergeBase !== head) return mergeBase;
-  }
-  return await revisionExists(repoPath, "HEAD^") ? "HEAD^" : void 0;
 }
 async function changedLineNumbers(repoPath, base, path) {
   const patch = await gitOutput(repoPath, ["diff", "--unified=0", base, "--", path]);
@@ -20107,12 +20239,21 @@ function reviewDomain(ctx, analysis) {
   const primary = [...active].sort((left, right) => RISK_ORDER[right.rule.severity] - RISK_ORDER[left.rule.severity] || left.rule.id.localeCompare(right.rule.id))[0];
   ctx.review.assessment({
     risk: primary.rule.severity,
-    summary: `${primary.rule.title}. ${primary.rule.impact}`
+    summary: assessmentSummary(active, primary.rule)
   });
-  ctx.review.opinion({
-    ship: primary.rule.severity === "low",
-    summary: primary.rule.severity === "low" ? `I would merge this change and address ${primary.rule.title.toLowerCase()} as follow-up hardening.` : `I would address ${primary.rule.title.toLowerCase()} before merging.`
-  });
+  ctx.review.opinion(
+    formatOpinion({
+      ship: primary.rule.severity === "low",
+      concern: primary.rule.concern,
+      change: ctx.change
+    })
+  );
+}
+function assessmentSummary(active, primary) {
+  if (active.length === 1) {
+    return `The primary lifecycle concern is ${primary.concern}.`;
+  }
+  return `${active.length} lifecycle issues were identified; the highest-severity is ${primary.concern}.`;
 }
 function addPositives(ctx, analysis) {
   const byKey = /* @__PURE__ */ new Map();
@@ -20122,15 +20263,25 @@ function addPositives(ctx, analysis) {
     byKey.set(item.key, existing);
   }
   for (const [key, items] of [...byKey].sort(([left], [right]) => left.localeCompare(right))) {
-    ctx.review.positive({
+    const note = {
       key,
-      summary: items.length === 1 ? items[0].summary : `${items.length} reviewed locations: ${items[0].summary}`,
+      summary: positiveSummary(items[0].summary, items.length),
       evidence: items.slice(0, 8).map((item) => ({
         location: { file: item.path, line: item.line },
         message: item.summary
       }))
-    });
+    };
+    if (items.length > 1) {
+      ctx.review.positive({ ...note, metadata: { locations: items.length } });
+    } else {
+      ctx.review.positive(note);
+    }
   }
+}
+function positiveSummary(base, count) {
+  if (count <= 1) return base;
+  const core = base.replace(/\.\s*$/, "");
+  return `${core} (${count} locations).`;
 }
 
 // src/index.ts
@@ -20141,14 +20292,21 @@ function createApp() {
     review: { maximumFindings: 5, minimumConfidence: "medium" }
   });
   app.rule(`${domain.name}.review`, async (ctx) => {
-    const discovery = await discoverSources(ctx.repoPath);
+    const discovery = await discoverSources(ctx.repoPath, ctx.change);
     const analysis = await analyzeDiscovery(discovery);
     ctx.summary.files_scanned = analysis.filesScanned;
-    ctx.review.observe({
-      key: domain.observationKey,
-      summary: analysis.mode === "diff" ? `Prepared ${analysis.filesScanned} changed ${domain.sourceDescription} files against ${analysis.base}.` : `Prepared ${analysis.filesScanned} ${domain.sourceDescription} files in repository review mode.`,
-      metadata: { parser: "tree-sitter-go", mode: analysis.mode, parseErrors: analysis.parseErrors }
-    });
+    if (analysis.parseErrors.length > 0) {
+      ctx.review.observe({
+        key: domain.observationKey,
+        summary: `Parsed ${analysis.filesScanned} ${domain.sourceDescription} files with ${analysis.parseErrors.length} parse error${analysis.parseErrors.length === 1 ? "" : "s"}.`,
+        metadata: {
+          role: "context",
+          parser: "tree-sitter-go",
+          mode: analysis.mode,
+          parseErrors: analysis.parseErrors.length
+        }
+      });
+    }
     reviewDomain(ctx, analysis);
   });
   return app;
