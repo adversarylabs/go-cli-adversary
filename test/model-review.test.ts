@@ -192,7 +192,8 @@ func parse() {
   assert.equal(modelNotes.length, 1);
   assert.match(modelNotes[0]!.summary, /Flag default changed incompatibly/);
   assert.equal(result.opinion?.ship, false);
-  assert.match(result.opinion?.summary ?? "", /incompatible flag default change|Flag default/);
+  // Concern is derived from observation title, not primaryConcern prose.
+  assert.match(result.opinion?.summary ?? "", /flag default changed incompatibly/i);
   assert.equal(modelNotes[0]!.evidence?.[0]?.location?.file, "cmd/root.go");
 });
 
@@ -403,10 +404,11 @@ func run() {
   assert.equal(result.assessment?.risk, "high", "risk must be max(static high, model)");
   assert.match(result.opinion?.summary ?? "", /before shipping|before merging|before committing/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
-  // Concern should be a short phrase, not the full model paragraph.
-  assert.ok(
-    (result.opinion?.summary ?? "").length < 280,
-    `opinion too long / unclipped concern: ${result.opinion?.summary}`,
+  // Concern comes from observation title (noun phrase), not free-form primaryConcern.
+  assert.match(result.opinion?.summary ?? "", /Commands discard inherited context/i);
+  assert.doesNotMatch(
+    result.opinion?.summary ?? "",
+    /cancellation is broken across most commands/i,
   );
 });
 
@@ -442,5 +444,43 @@ func run() error { return nil }
   const result = await runWithModel(root, model);
   assert.equal(result.opinion?.ship, false);
   assert.equal(result.assessment?.risk, "medium");
+  assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
+});
+
+test("opinion concern uses observation title noun phrase, not primaryConcern prose", async () => {
+  const root = await writeCliFixture("concern-title", {
+    "cmd/root.go": `package main
+
+func run() error { return nil }
+`,
+  });
+  const model = capturingModel({
+    assessment: {
+      risk: "high",
+      summary: "Exit-code contract is broken by deferred process termination.",
+    },
+    ship: false,
+    primaryConcern:
+      "defer os.Exit(124) in multiple commands overrides the normal exit-code path, causing successful invocations to exit 1",
+    observations: [
+      {
+        id: "exit-124",
+        title: "defer os.Exit(124) forces exit code 124 regardless of command success",
+        category: "exit-codes",
+        severity: "high",
+        confidence: "high",
+        summary: "Deferred os.Exit(124) always runs and yields timeout exit code 124.",
+        whyItMatters: "Scripts misinterpret success as timeout.",
+        recommendation: "Return errors and map exit codes once in main.",
+        evidenceIds: ["file:cmd/root.go"],
+      },
+    ],
+  });
+
+  const result = await runWithModel(root, model);
+  assert.equal(result.opinion?.ship, false);
+  assert.match(result.opinion?.summary ?? "", /defer os\.Exit\(124\)/);
+  assert.doesNotMatch(result.opinion?.summary ?? "", /overrides the normal exit-code path/i);
+  assert.doesNotMatch(result.opinion?.summary ?? "", /exit 1/i);
   assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
 });
