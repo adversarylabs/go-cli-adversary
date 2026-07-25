@@ -8,7 +8,7 @@
     "test": "npm run build && tsx --test test/*.test.ts"
   },
   "dependencies": {
-    "@adversarylabs/sdk": "github:adversarylabs/adversary-sdk-typescript#cc6ae12cf1ea37f984b09fb39ebdcc6864aad35a",
+    "@adversarylabs/sdk": "0.1.13",
     "web-tree-sitter": "^0.26.5"
   },
   "devDependencies": {
