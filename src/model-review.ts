@@ -293,6 +293,7 @@ export function applyModelCliReview(
   output: ModelCliReview,
   evidenceById: Map<string, PreparedEvidenceItem>,
   staticSeverities: StaticSeverity[] = [],
+  staticPrimaryConcern?: string,
 ): void {
   const modelObservationSeverities = output.observations.map((item) => item.severity);
   const risk = maxSeverity([
@@ -316,13 +317,22 @@ export function applyModelCliReview(
     modelObservationSeverities.some((severity) => severityRank(severity) >= severityRank("medium"));
   const ship = output.ship && !blocking;
 
-  // Opinion prose is "I would address <concern> before …". Only pass phrases that
-  // pass SDK requireOpinionConcern (noun phrases), never free-form model essays.
-  const concern = resolveOpinionConcern([
-    rankedObservations[0]?.title,
+  // Opinion prose is "I would address <concern> before …". Only noun phrases pass SDK
+  // validation. Prefer the severest story so risk/opinion stay coherent (static high
+  // os.Exit should not lose to a medium model headline).
+  const topModel = rankedObservations[0];
+  const staticMax = maxSeverity(staticSeverities);
+  const modelMax = maxSeverity(modelObservationSeverities);
+  const modelCandidates = [
+    topModel?.title,
     output.primaryConcern,
-    rankedObservations[0] === undefined ? undefined : categoryConcern(rankedObservations[0].category),
-  ]);
+    topModel === undefined ? undefined : categoryConcern(topModel.category),
+  ];
+  const staticCandidates = [staticPrimaryConcern];
+  const concern =
+    severityRank(staticMax) > severityRank(modelMax)
+      ? resolveOpinionConcern([...staticCandidates, ...modelCandidates])
+      : resolveOpinionConcern([...modelCandidates, ...staticCandidates]);
 
   ctx.review.opinion(
     formatOpinion({
@@ -368,6 +378,7 @@ export async function runModelCliReview(
   analysis: Analysis,
   files: DiscoveryFile[],
   staticSeverities: StaticSeverity[] = [],
+  staticPrimaryConcern?: string,
 ): Promise<"applied" | "unavailable"> {
   const { request, evidenceById } = buildModelReviewRequestFromDiscovery(
     ctx.change,
@@ -376,7 +387,7 @@ export async function runModelCliReview(
   );
   try {
     const result = await ctx.model.review<ModelCliReview>(request);
-    applyModelCliReview(ctx, result.output, evidenceById, staticSeverities);
+    applyModelCliReview(ctx, result.output, evidenceById, staticSeverities, staticPrimaryConcern);
     return "applied";
   } catch (error) {
     if (error instanceof ModelUnavailableError) {
@@ -445,12 +456,14 @@ function deriveConcernCandidates(raw: string): string[] {
   const normalized = raw.trim().replace(/\s+/g, " ");
   if (normalized === "") return [];
   const out: string[] = [];
-  const push = (value: string | undefined) => {
+  const push = (value: string | undefined, opts?: { allowHeadline?: boolean }) => {
     // SDK rejects ".!?" anywhere (so identifiers like os.Exit cannot be concerns).
     const cleaned = value?.trim().replace(/[.!?,:;]+$/g, "");
-    if (cleaned && !/[.!?]/.test(cleaned) && !out.includes(cleaned)) {
-      out.push(cleaned);
-    }
+    if (!cleaned || /[.!?]/.test(cleaned) || out.includes(cleaned)) return;
+    // Raw model headlines often pass SDK noun-phrase checks but read poorly after
+    // "I would address …" (e.g. "api get/post/patch/put silently no-op for v1 paths").
+    if (!opts?.allowHeadline && looksLikeHeadlineNotNounPhrase(cleaned)) return;
+    out.push(cleaned);
   };
 
   // "… forces exit code 124 regardless …" -> "forced exit code 124"
@@ -459,7 +472,20 @@ function deriveConcernCandidates(raw: string): string[] {
   );
   if (forcedCode?.[1] !== undefined) {
     const code = forcedCode[1].replace(/^(an?|the)\s+/i, "").trim();
-    push(`forced ${code}`);
+    push(`forced ${code}`, { allowHeadline: true });
+  }
+
+  // "api get/post/… silently no-op for v1 paths" -> "silent no-op v1 paths"
+  const silentNoop = normalized.match(
+    /\bsilently\s+no-?ops?\s+for\s+(.+?)(?:\s*,|\s+so\b|\s+without\b|$)/i,
+  );
+  if (silentNoop?.[1] !== undefined) {
+    push(`silent no-op ${silentNoop[1].trim()}`, { allowHeadline: true });
+  } else {
+    const noopFor = normalized.match(/\bno-?ops?\s+for\s+(.+?)(?:\s*,|\s+so\b|$)/i);
+    if (noopFor?.[1] !== undefined) {
+      push(`silent no-ops for ${noopFor[1].trim()}`, { allowHeadline: true });
+    }
   }
 
   // "Commands replace/discard inherited context with X" -> "inherited context in command handlers"
@@ -467,10 +493,10 @@ function deriveConcernCandidates(raw: string): string[] {
     /^(?:commands?|handlers?|paths?)\s+(?:replace|discard|use|start with)\s+(.+?)(?:\s*,|\s+with\b|\s+instead\b|$)/i,
   );
   if (replaceShape?.[1] !== undefined) {
-    push(`${replaceShape[1].trim()} in command handlers`);
+    push(`${replaceShape[1].trim()} in command handlers`, { allowHeadline: true });
   }
 
-  // Prefer short titles without sentence punctuation as-is.
+  // Prefer short titles without sentence punctuation as-is (only if already noun-like).
   const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] ?? normalized;
   push(firstSentence.replace(/[.!?]+$/g, "").trim());
 
@@ -483,6 +509,22 @@ function deriveConcernCandidates(raw: string): string[] {
   push(words.slice(0, 6).join(" "));
 
   return out;
+}
+
+/** Headlines that SDK may accept but that are awkward after "I would address …". */
+function looksLikeHeadlineNotNounPhrase(concern: string): boolean {
+  // Slash-separated method/command lists: "api get/post/patch/put …"
+  if (/\/[a-z0-9_-]+(?:\/[a-z0-9_-]+)+/i.test(concern)) return true;
+  if (/(?:^|\s)(?:get|post|patch|put|delete)\/(?:get|post|patch|put|delete)/i.test(concern)) {
+    return true;
+  }
+  // Adverb + verb-ish "silently no-op" reads as a clause fragment, not a noun phrase.
+  if (/\bsilently\b/i.test(concern)) return true;
+  // Trailing participial clause after a comma.
+  if (/,/.test(concern)) return true;
+  // Too long to sit cleanly after "address".
+  if (concern.split(/\s+/).length > 10) return true;
+  return false;
 }
 
 function categoryConcern(category: string): string | undefined {

@@ -73,7 +73,14 @@ export async function reviewDomain(
   );
 
   const staticSeverities = active.map((item) => item.rule.severity);
-  const modelStatus = await runModelCliReview(ctx, analysis, discoveryFiles, staticSeverities);
+  const staticPrimaryConcern = active[0]?.rule.concern;
+  const modelStatus = await runModelCliReview(
+    ctx,
+    analysis,
+    discoveryFiles,
+    staticSeverities,
+    staticPrimaryConcern,
+  );
   if (modelStatus === "applied") {
     return;
   }
