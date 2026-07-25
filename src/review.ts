@@ -1,4 +1,4 @@
-import { type RuleContext } from "@adversarylabs/sdk";
+import { formatOpinion, type RuleContext } from "@adversarylabs/sdk";
 import { domain } from "./domain.js";
 import { type Analysis, type RuleDefinition, type Signal } from "./types.js";
 
@@ -46,14 +46,26 @@ export function reviewDomain(ctx: RuleContext, analysis: Analysis): void {
     left.rule.id.localeCompare(right.rule.id))[0]!;
   ctx.review.assessment({
     risk: primary.rule.severity,
-    summary: `${primary.rule.title}. ${primary.rule.impact}`,
+    summary: assessmentSummary(active, primary.rule),
   });
-  ctx.review.opinion({
-    ship: primary.rule.severity === "low",
-    summary: primary.rule.severity === "low"
-      ? `I would merge this change and address ${primary.rule.title.toLowerCase()} as follow-up hardening.`
-      : `I would address ${primary.rule.title.toLowerCase()} before merging.`,
-  });
+  // Posture (merge / commit / ship) comes from the runner via ctx.change.
+  ctx.review.opinion(
+    formatOpinion({
+      ship: primary.rule.severity === "low",
+      concern: primary.rule.concern,
+      change: ctx.change,
+    }),
+  );
+}
+
+function assessmentSummary(
+  active: Array<{ rule: RuleDefinition; signals: Signal[] }>,
+  primary: RuleDefinition,
+): string {
+  if (active.length === 1) {
+    return `The primary lifecycle concern is ${primary.concern}.`;
+  }
+  return `${active.length} lifecycle issues were identified; the highest-severity is ${primary.concern}.`;
 }
 
 function addPositives(ctx: RuleContext, analysis: Analysis): void {
@@ -64,13 +76,24 @@ function addPositives(ctx: RuleContext, analysis: Analysis): void {
     byKey.set(item.key, existing);
   }
   for (const [key, items] of [...byKey].sort(([left], [right]) => left.localeCompare(right))) {
-    ctx.review.positive({
+    const note = {
       key,
-      summary: items.length === 1 ? items[0]!.summary : `${items.length} reviewed locations: ${items[0]!.summary}`,
+      summary: positiveSummary(items[0]!.summary, items.length),
       evidence: items.slice(0, 8).map((item) => ({
         location: { file: item.path, line: item.line },
         message: item.summary,
       })),
-    });
+    };
+    if (items.length > 1) {
+      ctx.review.positive({ ...note, metadata: { locations: items.length } });
+    } else {
+      ctx.review.positive(note);
+    }
   }
+}
+
+function positiveSummary(base: string, count: number): string {
+  if (count <= 1) return base;
+  const core = base.replace(/\.\s*$/, "");
+  return `${core} (${count} locations).`;
 }

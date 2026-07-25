@@ -11,6 +11,7 @@ export const domain: DomainDefinition = {
     {
       id: "go-cli.exit-bypass",
       title: "Command code terminates the process directly",
+      concern: "direct process termination below the application boundary",
       category: "correctness",
       severity: "high",
       confidence: "high",
@@ -22,6 +23,7 @@ export const domain: DomainDefinition = {
     {
       id: "go-cli.execute-error",
       title: "The root command error is discarded",
+      concern: "discarded root command execution errors",
       category: "correctness",
       severity: "high",
       confidence: "high",
@@ -33,6 +35,7 @@ export const domain: DomainDefinition = {
     {
       id: "go-cli.cancellation",
       title: "Long-running command work starts from a non-cancellable context",
+      concern: "non-cancellable context.Background in command work",
       category: "reliability",
       severity: "medium",
       confidence: "high",

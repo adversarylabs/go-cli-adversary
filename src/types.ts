@@ -31,6 +31,8 @@ export interface PositiveSignal {
 export interface RuleDefinition {
   id: string;
   title: string;
+  /** Short noun phrase for opinion/assessment framing (not a full clause title). */
+  concern: string;
   category: string;
   severity: "low" | "medium" | "high" | "critical";
   confidence: "medium" | "high";

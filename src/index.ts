@@ -16,16 +16,23 @@ export function createApp(): Adversary {
   });
 
   app.rule(`${domain.name}.review`, async (ctx) => {
-    const discovery = await discoverSources(ctx.repoPath);
+    const discovery = await discoverSources(ctx.repoPath, ctx.change);
     const analysis = await analyzeDiscovery(discovery);
     ctx.summary.files_scanned = analysis.filesScanned;
-    ctx.review.observe({
-      key: domain.observationKey,
-      summary: analysis.mode === "diff"
-        ? `Prepared ${analysis.filesScanned} changed ${domain.sourceDescription} files against ${analysis.base}.`
-        : `Prepared ${analysis.filesScanned} ${domain.sourceDescription} files in repository review mode.`,
-      metadata: { parser: "tree-sitter-go", mode: analysis.mode, parseErrors: analysis.parseErrors },
-    });
+    // Analysis prep is context for the runner (files scanned, mode), not a user-facing
+    // review observation. Keep metadata on a context-role note for tooling only.
+    if (analysis.parseErrors.length > 0) {
+      ctx.review.observe({
+        key: domain.observationKey,
+        summary: `Parsed ${analysis.filesScanned} ${domain.sourceDescription} files with ${analysis.parseErrors.length} parse error${analysis.parseErrors.length === 1 ? "" : "s"}.`,
+        metadata: {
+          role: "context",
+          parser: "tree-sitter-go",
+          mode: analysis.mode,
+          parseErrors: analysis.parseErrors.length,
+        },
+      });
+    }
     reviewDomain(ctx, analysis);
   });
   return app;
