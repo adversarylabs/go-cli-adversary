@@ -7,6 +7,7 @@ import {
   type ModelReviewRequest,
   type RuleContext,
 } from "@adversarylabs/sdk";
+import { pathPriority } from "./paths.js";
 import { type Analysis, type Signal } from "./types.js";
 
 const MAX_MODEL_FILES = 16;
@@ -418,15 +419,6 @@ function prioritizePaths(paths: readonly string[], changedFiles: readonly string
     if (leftChanged !== rightChanged) return leftChanged - rightChanged;
     return pathPriority(left) - pathPriority(right) || left.localeCompare(right);
   });
-}
-
-function pathPriority(path: string): number {
-  const normalized = path.replaceAll("\\", "/");
-  if (/(^|\/)main\.go$/.test(normalized)) return 0;
-  if (/(^|\/)cmd\//.test(normalized) || /(^|\/)cli\//.test(normalized)) return 1;
-  if (/(^|\/)internal\/(cmd|cli|app|command)\//.test(normalized)) return 2;
-  if (/(^|\/)pkg\//.test(normalized) || /(^|\/)internal\//.test(normalized)) return 4;
-  return 3;
 }
 
 function severityRank(severity: StaticSeverity | ModelCliObservation["severity"]): number {
