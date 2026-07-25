@@ -20275,22 +20275,36 @@ function parseNameStatus(output) {
 
 // src/review.ts
 var RISK_ORDER = { none: 0, low: 1, medium: 2, high: 3, critical: 4 };
+var MAX_EVIDENCE_SAMPLES = 8;
+var MAX_FINDINGS = 3;
+var COMMAND_SCOPED_RULES = /* @__PURE__ */ new Set([
+  "go-cli.cancellation",
+  "go-cli.subprocess-no-context"
+]);
 function reviewDomain(ctx, analysis) {
-  const active = [];
+  const candidates = [];
   for (const rule of domain.rules) {
-    const signals = analysis.signals.filter((signal) => signal.ruleId === rule.id);
-    if (signals.length === 0) continue;
-    active.push({ rule, signals });
+    const raw = analysis.signals.filter((signal) => signal.ruleId === rule.id);
+    if (raw.length === 0) continue;
+    const selected = selectSignals(rule.id, raw);
+    if (selected.total === 0) continue;
+    candidates.push({ rule, total: selected.total, samples: selected.samples });
+  }
+  const ranked = [...candidates].sort(
+    (left, right) => RISK_ORDER[right.rule.severity] - RISK_ORDER[left.rule.severity] || right.total - left.total || left.rule.id.localeCompare(right.rule.id)
+  );
+  const active = ranked.slice(0, MAX_FINDINGS);
+  for (const item of active) {
     ctx.finding({
-      ruleId: rule.id,
-      title: rule.title,
-      category: rule.category,
-      severity: rule.severity,
-      confidence: rule.confidence,
-      summary: rule.summary(signals.length),
-      whyItMatters: rule.whyItMatters,
-      impact: rule.impact,
-      evidence: signals.slice(0, 12).map((signal) => ({
+      ruleId: item.rule.id,
+      title: item.rule.title,
+      category: item.rule.category,
+      severity: item.rule.severity,
+      confidence: item.rule.confidence,
+      summary: item.rule.summary(item.total),
+      whyItMatters: item.rule.whyItMatters,
+      impact: item.rule.impact,
+      evidence: item.samples.map((signal) => ({
         location: {
           file: signal.path,
           line: signal.line,
@@ -20300,20 +20314,24 @@ function reviewDomain(ctx, analysis) {
         snippet: signal.snippet,
         data: signal.data
       })),
-      recommendation: rule.recommendation,
-      remediation: { complexity: "small" }
+      recommendation: item.rule.recommendation,
+      remediation: { complexity: "small" },
+      metadata: {
+        occurrences: item.total,
+        sampled: item.samples.length
+      }
     });
   }
-  addPositives(ctx, analysis);
+  addPositives(ctx, analysis, active.map((item) => item.rule.id));
   if (active.length === 0) {
     ctx.review.assessment({ risk: "none", summary: domain.noRiskSummary });
     ctx.review.opinion({ ship: true, summary: domain.approvalSummary });
     return;
   }
-  const primary = [...active].sort((left, right) => RISK_ORDER[right.rule.severity] - RISK_ORDER[left.rule.severity] || left.rule.id.localeCompare(right.rule.id))[0];
+  const primary = active[0];
   ctx.review.assessment({
     risk: primary.rule.severity,
-    summary: assessmentSummary(active, primary.rule)
+    summary: assessmentSummary(active)
   });
   ctx.review.opinion(
     formatOpinion({
@@ -20323,23 +20341,63 @@ function reviewDomain(ctx, analysis) {
     })
   );
 }
-function assessmentSummary(active, primary) {
-  if (active.length === 1) {
-    return `The primary lifecycle concern is ${primary.concern}.`;
+function selectSignals(ruleId, signals) {
+  let pool = signals;
+  if (COMMAND_SCOPED_RULES.has(ruleId)) {
+    const commandHits = signals.filter((signal) => isCommandPath(signal.path));
+    if (commandHits.length > 0) {
+      pool = commandHits;
+    }
   }
-  return `${active.length} lifecycle issues were identified; the highest-severity is ${primary.concern}.`;
+  const sorted = [...pool].sort(
+    (left, right) => pathPriority(left.path) - pathPriority(right.path) || left.path.localeCompare(right.path) || left.line - right.line
+  );
+  return {
+    total: pool.length,
+    samples: sorted.slice(0, MAX_EVIDENCE_SAMPLES)
+  };
 }
-function addPositives(ctx, analysis) {
+function pathPriority(path) {
+  const normalized = path.replaceAll("\\", "/");
+  if (/(^|\/)main\.go$/.test(normalized)) return 0;
+  if (/(^|\/)cmd\//.test(normalized) || /(^|\/)cli\//.test(normalized)) return 1;
+  if (/(^|\/)internal\/(cmd|cli|app|command)\//.test(normalized)) return 2;
+  if (/(^|\/)pkg\//.test(normalized) || /(^|\/)internal\//.test(normalized)) return 4;
+  return 3;
+}
+function isCommandPath(path) {
+  return pathPriority(path) <= 2;
+}
+function assessmentSummary(active) {
+  if (active.length === 1) {
+    const only = active[0];
+    return `Fix first: ${only.rule.concern} (${siteLabel(only.total)}).`;
+  }
+  const ordered = active.slice(0, MAX_FINDINGS).map((item, index) => `${index + 1}) ${item.rule.concern} (${siteLabel(item.total)})`).join("; ");
+  return `${active.length} priority lifecycle issues \u2014 address in order: ${ordered}.`;
+}
+function siteLabel(count) {
+  return count === 1 ? "1 site" : `${count} sites`;
+}
+function addPositives(ctx, analysis, activeRuleIds) {
   const byKey = /* @__PURE__ */ new Map();
   for (const item of analysis.positives) {
     const existing = byKey.get(item.key) ?? [];
     existing.push(item);
     byKey.set(item.key, existing);
   }
+  const hasCancellationFinding = activeRuleIds.includes("go-cli.cancellation");
   for (const [key, items] of [...byKey].sort(([left], [right]) => left.localeCompare(right))) {
+    let summary = positiveSummary(items[0].summary, items.length);
+    if (hasCancellationFinding && key === "go-cli.context-propagated") {
+      summary = positiveSummary(
+        "Command cancellation is propagated in some command paths.",
+        items.length
+      );
+    }
     const note = {
       key,
-      summary: positiveSummary(items[0].summary, items.length),
+      summary,
       evidence: items.slice(0, 8).map((item) => ({
         location: { file: item.path, line: item.line },
         message: item.summary
@@ -20363,7 +20421,8 @@ function createApp() {
   const app = new Adversary({
     name: domain.name,
     version: "0.0.1",
-    review: { maximumFindings: 5, minimumConfidence: "medium" }
+    // Domain already ranks and caps findings; keep SDK cap aligned.
+    review: { maximumFindings: 3, minimumConfidence: "medium" }
   });
   app.rule(`${domain.name}.review`, async (ctx) => {
     const discovery = await discoverSources(ctx.repoPath, ctx.change);

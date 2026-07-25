@@ -23,3 +23,11 @@ checklist. Prefer high-confidence, evidence-backed findings over soft style note
 - Lifecycle / trust / injection → medium–high  
 - Version / completions → low or informational  
 - Soft design guidance → documentation or opinion, not findings  
+
+## Judgment policy
+
+- Emit at most **3** findings, ordered by severity then occurrence count.  
+- Attach `metadata.occurrences` (true hit total) and a small evidence sample.  
+- Prefer **command paths** (`cmd/`, `cli/`, `main.go`, `internal/cmd|cli|app`) for
+  cancellation and subprocess rules when those paths have hits.  
+- Assessment lists priority issues in fix order; opinion names the primary concern.  

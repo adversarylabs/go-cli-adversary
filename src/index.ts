@@ -12,7 +12,8 @@ export function createApp(): Adversary {
   const app = new Adversary({
     name: domain.name,
     version: "0.0.1",
-    review: { maximumFindings: 5, minimumConfidence: "medium" },
+    // Domain already ranks and caps findings; keep SDK cap aligned.
+    review: { maximumFindings: 3, minimumConfidence: "medium" },
   });
 
   app.rule(`${domain.name}.review`, async (ctx) => {
