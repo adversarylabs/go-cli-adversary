@@ -1,6 +1,7 @@
 import { formatOpinion, requireOpinionConcern, type RuleContext } from "@adversarylabs/sdk";
 import { domain } from "./domain.js";
 import { runModelCliReview, type DiscoveryFile } from "./model-review.js";
+import { isCommandPath, isNonProductPath, pathPriority } from "./paths.js";
 import { type Analysis, type RuleDefinition, type Signal } from "./types.js";
 
 const RISK_ORDER = { none: 0, low: 1, medium: 2, high: 3, critical: 4 } as const;
@@ -13,6 +14,7 @@ const MAX_FINDINGS = 3;
 const COMMAND_SCOPED_RULES = new Set([
   "go-cli.cancellation",
   "go-cli.subprocess-no-context",
+  "go-cli.exit-bypass",
 ]);
 
 export async function reviewDomain(
@@ -109,9 +111,13 @@ function selectSignals(
   ruleId: string,
   signals: Signal[],
 ): { total: number; samples: Signal[] } {
-  let pool = signals;
+  // Never surface scripts/tools/testdata as product CLI lifecycle findings.
+  let pool = signals.filter((signal) => !isNonProductPath(signal.path));
+  if (pool.length === 0) {
+    return { total: 0, samples: [] };
+  }
   if (COMMAND_SCOPED_RULES.has(ruleId)) {
-    const commandHits = signals.filter((signal) => isCommandPath(signal.path));
+    const commandHits = pool.filter((signal) => isCommandPath(signal.path));
     if (commandHits.length > 0) {
       pool = commandHits;
     }
@@ -126,19 +132,6 @@ function selectSignals(
     total: pool.length,
     samples: sorted.slice(0, MAX_EVIDENCE_SAMPLES),
   };
-}
-
-function pathPriority(path: string): number {
-  const normalized = path.replaceAll("\\", "/");
-  if (/(^|\/)main\.go$/.test(normalized)) return 0;
-  if (/(^|\/)cmd\//.test(normalized) || /(^|\/)cli\//.test(normalized)) return 1;
-  if (/(^|\/)internal\/(cmd|cli|app|command)\//.test(normalized)) return 2;
-  if (/(^|\/)pkg\//.test(normalized) || /(^|\/)internal\//.test(normalized)) return 4;
-  return 3;
-}
-
-function isCommandPath(path: string): boolean {
-  return pathPriority(path) <= 2;
 }
 
 function assessmentSummary(active: Array<{ rule: RuleDefinition; total: number }>): string {

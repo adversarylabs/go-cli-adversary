@@ -1,3 +1,8 @@
+import {
+  isNonProductPath,
+  isProcessBoundaryExit,
+  isRootSignalBootstrap,
+} from "./paths.js";
 import { contentSignal, lineSignals, positive } from "./signals.js";
 import { type DomainDefinition, type Signal, type SourceRevision } from "./types.js";
 
@@ -96,15 +101,7 @@ export const domain: DomainDefinition = {
           /^\s*(?:rootCmd|cmd|app)\.Execute(?:Context)?\(\)\s*$/m,
           "The command execution error is not inspected or returned.",
         ),
-        ...lineSignals(
-          file,
-          "go-cli.cancellation",
-          /\bcontext\.(?:Background|TODO)\s*\(\)/,
-          (match) =>
-            match[0]?.includes("TODO")
-              ? "The command starts work from context.TODO instead of the inherited context."
-              : "The command replaces its inherited cancellation context with context.Background.",
-        ),
+        ...cancellationSignals(file),
         ...subprocessSignals(file),
         ...shellInterpolationSignals(file),
       ],
@@ -133,6 +130,7 @@ export const domain: DomainDefinition = {
 };
 
 function exitBypassSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
   return lineSignals(
     file,
     "go-cli.exit-bypass",
@@ -144,10 +142,29 @@ function exitBypassSignals(file: SourceRevision): Signal[] {
       }
       return "This command path terminates the process directly.";
     },
-  );
+  ).filter((signal) => !isProcessBoundaryExit(signal.snippet, signal.path));
+}
+
+function cancellationSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  const lines = file.current.split("\n");
+  return lineSignals(
+    file,
+    "go-cli.cancellation",
+    /\bcontext\.(?:Background|TODO)\s*\(\)/,
+    (match) =>
+      match[0]?.includes("TODO")
+        ? "The command starts work from context.TODO instead of the inherited context."
+        : "The command replaces its inherited cancellation context with context.Background.",
+  ).filter((signal) => {
+    const index = signal.line - 1;
+    const surrounding = lines.slice(Math.max(0, index - 2), index + 1).join("\n");
+    return !isRootSignalBootstrap(signal.snippet, surrounding);
+  });
 }
 
 function subprocessSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
   return lineSignals(
     file,
     "go-cli.subprocess-no-context",
@@ -161,6 +178,7 @@ function subprocessSignals(file: SourceRevision): Signal[] {
 }
 
 function shellInterpolationSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
   return lineSignals(
     file,
     "go-cli.shell-interpolation",
