@@ -15143,7 +15143,7 @@ function createRuleContext(repoPath, change, summary, cache, collector, registry
     change,
     summary,
     cache,
-    model,
+    model: enhanceReviewModel(model),
     relpath(path) {
       return relative(absoluteRepoPath, isAbsolute(path) ? path : resolve(absoluteRepoPath, path));
     },
@@ -15540,7 +15540,110 @@ function requireOpinionConcern(concern, label = "opinion concern") {
   if (looksLikeFiniteClause(normalized)) {
     throw new Error(`${label} must be a noun phrase (for example "direct process termination"), not a clause (for example "commands replace inherited context").`);
   }
+  if (looksLikeHeadlineNotNounPhrase(normalized)) {
+    throw new Error(`${label} must be a short noun phrase, not a headline (for example use "silent no-op v1 paths", not "api get/post/patch/put silently no-op for v1 paths").`);
+  }
   return normalized;
+}
+var OPINION_CONCERN_REWRITE_PROMPT = `Rewrite the input text into a short noun phrase suitable after the words "I would address".
+
+Rules:
+- Return only a noun phrase (for example "direct process termination below the application boundary" or "forced exit code 124")
+- Do not write a full sentence or finite clause (not "commands replace inherited context")
+- No terminal punctuation (.!?)
+- No dotted code identifiers (not "os.Exit" or "context.Background")
+- No slash-separated method lists (not "get/post/patch/put")
+- At most ${MAX_OPINION_CONCERN_LENGTH} characters
+- Prefer the primary engineering concern over command inventories or headlines`;
+var OPINION_CONCERN_REWRITE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["concern"],
+  properties: {
+    concern: {
+      type: "string",
+      minLength: 3,
+      maxLength: MAX_OPINION_CONCERN_LENGTH
+    }
+  }
+};
+var DEFAULT_CONCERN_REWRITE_BUDGET = {
+  maximumOutputTokens: 128,
+  timeoutMs: 3e4
+};
+async function rewriteOpinionConcern(model, request) {
+  if (typeof request !== "object" || request === null) {
+    throw new ModelReviewError("Model concern request must be an object.", {
+      code: "invalid_model_request"
+    });
+  }
+  if (typeof request.text !== "string") {
+    throw new ModelReviewError("Model concern text must be a string.", {
+      code: "invalid_model_request"
+    });
+  }
+  const text = request.text.trim();
+  if (text === "") {
+    throw new ModelReviewError("Model concern text must be a non-empty string.", {
+      code: "invalid_model_request"
+    });
+  }
+  if (isOpinionConcernPhrase(text)) {
+    return {
+      concern: requireOpinionConcern(text),
+      rewritten: false,
+      provider: "local",
+      model: "passthrough"
+    };
+  }
+  const maxAttempts = request.maxAttempts === void 0 ? 2 : requirePositiveInteger(request.maxAttempts, "maxAttempts", 4);
+  const budget = {
+    maximumOutputTokens: request.budget?.maximumOutputTokens ?? DEFAULT_CONCERN_REWRITE_BUDGET.maximumOutputTokens,
+    timeoutMs: request.budget?.timeoutMs ?? DEFAULT_CONCERN_REWRITE_BUDGET.timeoutMs
+  };
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const prompt = attempt === 1 ? OPINION_CONCERN_REWRITE_PROMPT : `${OPINION_CONCERN_REWRITE_PROMPT}
+
+Previous attempt was rejected: ${lastError ?? "invalid noun phrase"}.
+Return only a pure noun phrase that passes validation.`;
+    const result = await model.review({
+      prompt,
+      input: {
+        text,
+        ...lastError === void 0 ? {} : { previousError: lastError }
+      },
+      schema: OPINION_CONCERN_REWRITE_SCHEMA,
+      budget
+    });
+    try {
+      const concern = requireOpinionConcern(result.output.concern, "model concern rewrite");
+      return {
+        concern,
+        rewritten: true,
+        provider: result.provider,
+        model: result.model,
+        ...result.usage === void 0 ? {} : { usage: result.usage }
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  throw new ModelReviewError(`Model failed to produce a valid opinion concern after ${maxAttempts} attempts${lastError === void 0 ? "" : `: ${lastError}`}.`, { code: "invalid_opinion_concern" });
+}
+function enhanceReviewModel(model) {
+  return {
+    review: (request) => model.review(request),
+    concern: (request) => rewriteOpinionConcern(model, request)
+  };
+}
+function requirePositiveInteger(value, name2, maximum) {
+  if (!Number.isInteger(value) || value < 1 || value > maximum) {
+    throw new ModelReviewError(`${name2} must be an integer from 1 through ${maximum}.`, {
+      code: "invalid_model_request"
+    });
+  }
+  return value;
 }
 function formatOpinion(options) {
   if (typeof options.ship !== "boolean") {
@@ -15581,6 +15684,21 @@ function looksLikeFiniteClause(concern) {
     return true;
   }
   if (/(?:^|\s)(?:replace|replaces|discard|discards|force|forces|override|overrides|cause|causes|prevent|prevents|block|blocks|break|breaks|succeed|succeeds|fail|fails|mix|mixes|omit|omits|ignore|ignores)\s+\S+/i.test(concern)) {
+    return true;
+  }
+  return false;
+}
+function looksLikeHeadlineNotNounPhrase(concern) {
+  if ((concern.match(/\//g) ?? []).length >= 2) {
+    return true;
+  }
+  if (/(?:^|\s)(?:get|post|patch|put|delete)\/(?:get|post|patch|put|delete)/i.test(concern)) {
+    return true;
+  }
+  if (/\bsilently\b/i.test(concern)) {
+    return true;
+  }
+  if (/,\s+(?:breaking|causing|preventing|leaving|blocking|forcing|overriding|so\b|which\b|and then\b)/i.test(concern)) {
     return true;
   }
   return false;
@@ -16238,6 +16356,47 @@ function omitUndefined(value) {
   return Object.fromEntries(Object.entries(value).filter(([, entryValue]) => entryValue !== void 0));
 }
 
+// src/paths.ts
+function normalizeRepoPath(path) {
+  return path.replaceAll("\\", "/");
+}
+function isNonProductPath(path) {
+  const normalized = normalizeRepoPath(path);
+  return /(^|\/)(?:scripts|tools|testdata|third_party|vendor|node_modules)\//.test(
+    normalized
+  );
+}
+function pathPriority(path) {
+  const normalized = normalizeRepoPath(path);
+  if (isNonProductPath(normalized)) return 100;
+  if (/(^|\/)main\.go$/.test(normalized)) return 0;
+  if (/(^|\/)cmd\//.test(normalized) || /(^|\/)cli\//.test(normalized)) return 1;
+  if (/(^|\/)internal\/(cmd|cli|app|command)\//.test(normalized)) return 2;
+  if (/(^|\/)pkg\//.test(normalized) || /(^|\/)internal\//.test(normalized)) return 4;
+  return 3;
+}
+function isCommandPath(path) {
+  return pathPriority(path) <= 2;
+}
+function isMainPackagePath(path) {
+  return /(^|\/)main\.go$/.test(normalizeRepoPath(path));
+}
+function isProcessBoundaryExit(snippet, path) {
+  if (!isMainPackagePath(path)) return false;
+  if (/\bdefer\b/.test(snippet)) return false;
+  if (/\bFatal/.test(snippet)) return false;
+  if (/\bos\.Exit\s*\(\s*(?:[\w.]+\.)?ExitCode\b/.test(snippet)) return true;
+  if (/\bos\.Exit\s*\(\s*(?:err|code|status|exitCode|exitStatus)\b/.test(snippet)) {
+    return true;
+  }
+  return false;
+}
+function isRootSignalBootstrap(snippet, surrounding) {
+  const compact = `${surrounding}
+${snippet}`.replace(/\s+/g, " ");
+  return /signal\.NotifyContext\s*\(\s*context\.(?:Background|TODO)\s*\(\s*\)/.test(compact);
+}
+
 // src/signals.ts
 function lineSignals(file, ruleId, pattern, message, data = () => ({})) {
   const signals = [];
@@ -16359,12 +16518,7 @@ var domain = {
           /^\s*(?:rootCmd|cmd|app)\.Execute(?:Context)?\(\)\s*$/m,
           "The command execution error is not inspected or returned."
         ),
-        ...lineSignals(
-          file,
-          "go-cli.cancellation",
-          /\bcontext\.(?:Background|TODO)\s*\(\)/,
-          (match) => match[0]?.includes("TODO") ? "The command starts work from context.TODO instead of the inherited context." : "The command replaces its inherited cancellation context with context.Background."
-        ),
+        ...cancellationSignals(file),
         ...subprocessSignals(file),
         ...shellInterpolationSignals(file)
       ],
@@ -16392,6 +16546,7 @@ var domain = {
   }
 };
 function exitBypassSignals(file) {
+  if (isNonProductPath(file.path)) return [];
   return lineSignals(
     file,
     "go-cli.exit-bypass",
@@ -16403,9 +16558,24 @@ function exitBypassSignals(file) {
       }
       return "This command path terminates the process directly.";
     }
-  );
+  ).filter((signal) => !isProcessBoundaryExit(signal.snippet, signal.path));
+}
+function cancellationSignals(file) {
+  if (isNonProductPath(file.path)) return [];
+  const lines = file.current.split("\n");
+  return lineSignals(
+    file,
+    "go-cli.cancellation",
+    /\bcontext\.(?:Background|TODO)\s*\(\)/,
+    (match) => match[0]?.includes("TODO") ? "The command starts work from context.TODO instead of the inherited context." : "The command replaces its inherited cancellation context with context.Background."
+  ).filter((signal) => {
+    const index = signal.line - 1;
+    const surrounding = lines.slice(Math.max(0, index - 2), index + 1).join("\n");
+    return !isRootSignalBootstrap(signal.snippet, surrounding);
+  });
 }
 function subprocessSignals(file) {
+  if (isNonProductPath(file.path)) return [];
   return lineSignals(
     file,
     "go-cli.subprocess-no-context",
@@ -16416,6 +16586,7 @@ function subprocessSignals(file) {
   );
 }
 function shellInterpolationSignals(file) {
+  if (isNonProductPath(file.path)) return [];
   return lineSignals(
     file,
     "go-cli.shell-interpolation",
@@ -20622,7 +20793,9 @@ Use only the prepared evidence and source excerpts. Cite evidence with the provi
 Return a small number of high-confidence observations (zero is valid). Prefer severity that matches user impact.
 
 For each observation.title use a short headline. Prefer noun phrases when possible.
-If you set primaryConcern, it must be a short noun phrase (for example "forced exit code 124"), never a full sentence.`;
+If you set primaryConcern, it must be a short noun phrase suitable after "I would address \u2026"
+(for example "forced exit code 124" or "silent no-op v1 paths"), never a full sentence,
+clause, or slash-separated method list.`;
 var GO_CLI_MODEL_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -20787,7 +20960,7 @@ function buildModelReviewRequestFromDiscovery(change, analysis, files) {
     }
   };
 }
-function applyModelCliReview(ctx, output, evidenceById, staticSeverities = []) {
+async function applyModelCliReview(ctx, output, evidenceById, staticSeverities = [], staticPrimaryConcern) {
   const modelObservationSeverities = output.observations.map((item) => item.severity);
   const risk = maxSeverity([
     output.assessment.risk,
@@ -20803,11 +20976,17 @@ function applyModelCliReview(ctx, output, evidenceById, staticSeverities = []) {
   );
   const blocking = staticSeverities.some((severity) => severityRank(severity) >= severityRank("medium")) || modelObservationSeverities.some((severity) => severityRank(severity) >= severityRank("medium"));
   const ship = output.ship && !blocking;
-  const concern = resolveOpinionConcern([
-    rankedObservations[0]?.title,
+  const topModel = rankedObservations[0];
+  const staticMax = maxSeverity(staticSeverities);
+  const modelMax = maxSeverity(modelObservationSeverities);
+  const modelCandidates = [
+    topModel?.title,
     output.primaryConcern,
-    rankedObservations[0] === void 0 ? void 0 : categoryConcern(rankedObservations[0].category)
-  ]);
+    topModel === void 0 ? void 0 : categoryConcern(topModel.category)
+  ];
+  const staticCandidates = [staticPrimaryConcern];
+  const ordered = severityRank(staticMax) > severityRank(modelMax) ? [...staticCandidates, ...modelCandidates] : [...modelCandidates, ...staticCandidates];
+  const concern = await resolveOpinionConcern(ctx, ordered);
   ctx.review.opinion(
     formatOpinion({
       ship,
@@ -20840,7 +21019,7 @@ function applyModelCliReview(ctx, output, evidenceById, staticSeverities = []) {
     });
   }
 }
-async function runModelCliReview(ctx, analysis, files, staticSeverities = []) {
+async function runModelCliReview(ctx, analysis, files, staticSeverities = [], staticPrimaryConcern) {
   const { request, evidenceById } = buildModelReviewRequestFromDiscovery(
     ctx.change,
     analysis,
@@ -20848,7 +21027,13 @@ async function runModelCliReview(ctx, analysis, files, staticSeverities = []) {
   );
   try {
     const result = await ctx.model.review(request);
-    applyModelCliReview(ctx, result.output, evidenceById, staticSeverities);
+    await applyModelCliReview(
+      ctx,
+      result.output,
+      evidenceById,
+      staticSeverities,
+      staticPrimaryConcern
+    );
     return "applied";
   } catch (error) {
     if (error instanceof ModelUnavailableError) {
@@ -20870,14 +21055,6 @@ function prioritizePaths(paths, changedFiles) {
     return pathPriority(left) - pathPriority(right) || left.localeCompare(right);
   });
 }
-function pathPriority(path) {
-  const normalized = path.replaceAll("\\", "/");
-  if (/(^|\/)main\.go$/.test(normalized)) return 0;
-  if (/(^|\/)cmd\//.test(normalized) || /(^|\/)cli\//.test(normalized)) return 1;
-  if (/(^|\/)internal\/(cmd|cli|app|command)\//.test(normalized)) return 2;
-  if (/(^|\/)pkg\//.test(normalized) || /(^|\/)internal\//.test(normalized)) return 4;
-  return 3;
-}
 function severityRank(severity) {
   switch (severity) {
     case "critical":
@@ -20892,45 +21069,19 @@ function severityRank(severity) {
       return 0;
   }
 }
-function resolveOpinionConcern(candidates) {
+async function resolveOpinionConcern(ctx, candidates) {
   for (const candidate of candidates) {
-    if (candidate === void 0) continue;
-    for (const derived of deriveConcernCandidates(candidate)) {
-      if (isOpinionConcernPhrase(derived)) {
-        return requireOpinionConcern(derived);
-      }
+    if (candidate === void 0 || candidate.trim() === "") continue;
+    if (isOpinionConcernPhrase(candidate)) {
+      return requireOpinionConcern(candidate);
+    }
+    try {
+      const result = await ctx.model.concern({ text: candidate });
+      return result.concern;
+    } catch {
     }
   }
   return void 0;
-}
-function deriveConcernCandidates(raw) {
-  const normalized = raw.trim().replace(/\s+/g, " ");
-  if (normalized === "") return [];
-  const out2 = [];
-  const push = (value) => {
-    const cleaned = value?.trim().replace(/[.!?,:;]+$/g, "");
-    if (cleaned && !/[.!?]/.test(cleaned) && !out2.includes(cleaned)) {
-      out2.push(cleaned);
-    }
-  };
-  const forcedCode = normalized.match(
-    /\b(?:forces?|overrides?|causes?)\s+((?:an?\s+|the\s+)?(?:exit\s+)?code\s+\d+)\b/i
-  );
-  if (forcedCode?.[1] !== void 0) {
-    const code = forcedCode[1].replace(/^(an?|the)\s+/i, "").trim();
-    push(`forced ${code}`);
-  }
-  const replaceShape = normalized.match(
-    /^(?:commands?|handlers?|paths?)\s+(?:replace|discard|use|start with)\s+(.+?)(?:\s*,|\s+with\b|\s+instead\b|$)/i
-  );
-  if (replaceShape?.[1] !== void 0) {
-    push(`${replaceShape[1].trim()} in command handlers`);
-  }
-  const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] ?? normalized;
-  push(firstSentence.replace(/[.!?]+$/g, "").trim());
-  const words = firstSentence.replace(/[.!?]+$/g, "").trim().split(/\s+/).filter((word) => !/[.!?]/.test(word));
-  push(words.slice(0, 6).join(" "));
-  return out2;
 }
 function categoryConcern(category) {
   switch (category) {
@@ -20975,7 +21126,8 @@ var MAX_EVIDENCE_SAMPLES = 8;
 var MAX_FINDINGS = 3;
 var COMMAND_SCOPED_RULES = /* @__PURE__ */ new Set([
   "go-cli.cancellation",
-  "go-cli.subprocess-no-context"
+  "go-cli.subprocess-no-context",
+  "go-cli.exit-bypass"
 ]);
 async function reviewDomain(ctx, analysis, discoveryFiles = []) {
   const candidates = [];
@@ -21024,7 +21176,14 @@ async function reviewDomain(ctx, analysis, discoveryFiles = []) {
     active.map((item) => item.rule.id)
   );
   const staticSeverities = active.map((item) => item.rule.severity);
-  const modelStatus = await runModelCliReview(ctx, analysis, discoveryFiles, staticSeverities);
+  const staticPrimaryConcern = active[0]?.rule.concern;
+  const modelStatus = await runModelCliReview(
+    ctx,
+    analysis,
+    discoveryFiles,
+    staticSeverities,
+    staticPrimaryConcern
+  );
   if (modelStatus === "applied") {
     return;
   }
@@ -21047,31 +21206,23 @@ async function reviewDomain(ctx, analysis, discoveryFiles = []) {
   );
 }
 function selectSignals(ruleId, signals) {
-  let pool = signals;
+  let pool = signals.filter((signal) => !isNonProductPath(signal.path));
+  if (pool.length === 0) {
+    return { total: 0, samples: [] };
+  }
   if (COMMAND_SCOPED_RULES.has(ruleId)) {
-    const commandHits = signals.filter((signal) => isCommandPath(signal.path));
+    const commandHits = pool.filter((signal) => isCommandPath(signal.path));
     if (commandHits.length > 0) {
       pool = commandHits;
     }
   }
   const sorted = [...pool].sort(
-    (left, right) => pathPriority2(left.path) - pathPriority2(right.path) || left.path.localeCompare(right.path) || left.line - right.line
+    (left, right) => pathPriority(left.path) - pathPriority(right.path) || left.path.localeCompare(right.path) || left.line - right.line
   );
   return {
     total: pool.length,
     samples: sorted.slice(0, MAX_EVIDENCE_SAMPLES)
   };
-}
-function pathPriority2(path) {
-  const normalized = path.replaceAll("\\", "/");
-  if (/(^|\/)main\.go$/.test(normalized)) return 0;
-  if (/(^|\/)cmd\//.test(normalized) || /(^|\/)cli\//.test(normalized)) return 1;
-  if (/(^|\/)internal\/(cmd|cli|app|command)\//.test(normalized)) return 2;
-  if (/(^|\/)pkg\//.test(normalized) || /(^|\/)internal\//.test(normalized)) return 4;
-  return 3;
-}
-function isCommandPath(path) {
-  return pathPriority2(path) <= 2;
 }
 function assessmentSummary(active) {
   if (active.length === 1) {
