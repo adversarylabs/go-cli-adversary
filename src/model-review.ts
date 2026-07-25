@@ -28,7 +28,10 @@ Focus only on Go CLI engineering that affects users of the CLI:
 Do NOT review generic Go style, broad security, observability, databases, or general engineering quality unless it directly breaks the CLI contract.
 
 Use only the prepared evidence and source excerpts. Cite evidence with the provided evidence IDs.
-Return a small number of high-confidence observations (zero is valid). Prefer severity that matches user impact.`;
+Return a small number of high-confidence observations (zero is valid). Prefer severity that matches user impact.
+
+For each observation.title use a short headline. Prefer noun phrases when possible.
+If you set primaryConcern, it must be a short noun phrase (for example \"forced exit code 124\"), never a full sentence.`;
 
 /** Strict, provider-compatible JSON Schema for structured Go CLI model output. */
 export const GO_CLI_MODEL_SCHEMA: Record<string, unknown> = {
@@ -49,7 +52,7 @@ export const GO_CLI_MODEL_SCHEMA: Record<string, unknown> = {
       },
     },
     ship: { type: "boolean" },
-    primaryConcern: { type: "string", minLength: 1, maxLength: 240 },
+    primaryConcern: { type: "string", minLength: 1, maxLength: 120 },
     observations: {
       type: "array",
       maxItems: MAX_MODEL_OBSERVATIONS,
@@ -305,9 +308,10 @@ export function applyModelCliReview(
     (left, right) =>
       severityRank(right.severity) - severityRank(left.severity) || left.id.localeCompare(right.id),
   );
-  const concern = shortConcern(
-    output.primaryConcern?.trim() || rankedObservations[0]?.title,
-  );
+  // Opinion prose is "I would address <concern> before …". Use a short noun
+  // phrase derived from the top observation title only. Free-form primaryConcern
+  // is often a full clause and produces ungrammatical formatOpinion output.
+  const concern = opinionConcernFromTitle(rankedObservations[0]?.title);
 
   // Never advertise ship-as-is when static or model work still shows material issues.
   const blocking =
@@ -416,13 +420,30 @@ function severityRank(severity: StaticSeverity | ModelCliObservation["severity"]
   }
 }
 
-function shortConcern(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const normalized = value.trim().replace(/\s+/g, " ");
+/**
+ * Build a concern phrase for formatOpinion from an observation title.
+ * Prefer a short headline; for "X forces/overrides Y" keep only the code-ish subject.
+ */
+function opinionConcernFromTitle(title: string | undefined): string | undefined {
+  if (title === undefined) return undefined;
+  const normalized = title.trim().replace(/\s+/g, " ");
   if (normalized === "") return undefined;
+
+  // "defer os.Exit(124) forces exit code 124..." -> "defer os.Exit(124)"
+  const codeSubject = normalized.match(
+    /^(.{3,90}?(?:\([^)]*\)|os\.Exit|context\.\w+|exec\.\w+|cmd\.\w+))\s+(?:forces?|overrides?|causes?|prevents?|blocks?|breaks?)\b/i,
+  );
+  if (codeSubject?.[1] !== undefined) {
+    return codeSubject[1].trim().replace(/[.!?,:;]+$/g, "");
+  }
+
   const firstSentence = normalized.split(/(?<=[.!?])\s+/)[0] ?? normalized;
-  const clipped = firstSentence.length > 120 ? `${firstSentence.slice(0, 117).trimEnd()}...` : firstSentence;
-  return clipped.replace(/[.!?]+$/g, "").trim();
+  const cleaned = firstSentence.replace(/[.!?]+$/g, "").trim();
+  const words = cleaned.split(/\s+/);
+  if (words.length <= 10 && cleaned.length <= 90) {
+    return cleaned;
+  }
+  return words.slice(0, 8).join(" ");
 }
 
 function maxSeverity(values: Array<StaticSeverity | ModelCliObservation["severity"]>): StaticSeverity {
