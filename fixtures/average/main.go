@@ -1,7 +1,16 @@
 package average
 
-import "context"
+import (
+	"context"
+	"os/exec"
+)
 
-func run() error { return work(context.Background()) }
+func run() error {
+	_ = context.TODO()
+	return work(context.Background())
+}
 
-func work(context.Context) error { return nil }
+func work(ctx context.Context) error {
+	_ = exec.Command("git", "status")
+	return nil
+}

@@ -1,1 +1,1 @@
-{"risk":"none","findings":[],"positiveKeys":["go-cli.context-propagated"],"ship":true}
+{"risk":"none","findings":[],"positiveKeys":["go-cli.context-propagated","go-cli.subprocess-context"],"ship":true}
