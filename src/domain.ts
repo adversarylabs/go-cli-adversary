@@ -213,6 +213,58 @@ export const domain: DomainDefinition = {
       impact: "User messages appear on the wrong stream or with unwanted prefixes.",
       recommendation: "Write user-facing text via injected IO streams (stderr/stdout), not log.Printf.",
     },
+    {
+      id: "go-cli.init-side-effects",
+      title: "Package init performs I/O or client construction",
+      concern: "side effects in package init",
+      category: "reliability",
+      severity: "low",
+      confidence: "medium",
+      summary: (count) =>
+        `${count} package init block${count === 1 ? "" : "s"} construct clients or perform I/O.`,
+      whyItMatters: "init side effects make commands hard to test and can run before flags are parsed.",
+      impact: "Imports trigger network/filesystem work unexpectedly.",
+      recommendation: "Construct clients in main/App wiring after configuration is resolved.",
+    },
+    {
+      id: "go-cli.os-args-outside-main",
+      title: "Library/command package reads os.Args directly",
+      concern: "os.Args used outside the process entrypoint",
+      category: "reliability",
+      severity: "low",
+      confidence: "medium",
+      summary: (count) =>
+        `${count} non-main path${count === 1 ? "" : "s"} read os.Args instead of injected args.`,
+      whyItMatters: "Direct os.Args coupling blocks unit tests and multi-command composition.",
+      impact: "Command packages cannot be tested without mutating process-global arguments.",
+      recommendation: "Accept args via cobra/urfave/flag sets or function parameters from main.",
+    },
+    {
+      id: "go-cli.ansi-no-tty",
+      title: "ANSI/spinner output without a terminal guard in-file",
+      concern: "ANSI or spinner output without TTY detection",
+      category: "correctness",
+      severity: "low",
+      confidence: "medium",
+      summary: (count) =>
+        `${count} path${count === 1 ? "" : "s"} emit spinner/ANSI sequences without an in-file TTY guard.`,
+      whyItMatters: "Cursor and color control corrupt CI and piped logs.",
+      impact: "Non-interactive environments receive escape noise in captured output.",
+      recommendation: "Gate spinners/colors on term.IsTerminal (or disable when CI=true).",
+    },
+    {
+      id: "go-cli.option-smuggling-risk",
+      title: "Revision-like argument is passed to a subprocess without validation",
+      concern: "subprocess args that may allow option smuggling",
+      category: "security",
+      severity: "medium",
+      confidence: "medium",
+      summary: (count) =>
+        `${count} path${count === 1 ? "" : "s"} pass variables into git/docker/kubectl argv after options without an obvious validator.`,
+      whyItMatters: "Unvalidated refs can be interpreted as child-process flags (`-x`).",
+      impact: "User-controlled revision strings can change child tool behavior unexpectedly.",
+      recommendation: "Validate refs (reject leading `-` / NUL) or use `--` before positional args.",
+    },
   ],
   noRiskSummary: "The reviewed command paths preserve errors, cancellation, and process-boundary ownership.",
   approvalSummary: "I would approve the reviewed CLI lifecycle and automation behavior.",
@@ -238,6 +290,10 @@ export const domain: DomainDefinition = {
         ...versionIdentitySignals(file),
         ...jsonWithoutFormatSignals(file),
         ...bareUserLogSignals(file),
+        ...initSideEffectSignals(file),
+        ...osArgsOutsideMainSignals(file),
+        ...ansiNoTtySignals(file),
+        ...optionSmugglingSignals(file),
       ],
       positives: [
         ...positive(
@@ -501,4 +557,76 @@ function bareUserLogSignals(file: SourceRevision): Signal[] {
     /\blog\.(?:Print|Printf|Println)\s*\(/,
     () => "This path uses the log package for messaging instead of explicit stdout/stderr writes.",
   );
+}
+
+/** init() blocks that construct network clients or call Must/Exit. */
+function initSideEffectSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  if (!/\bfunc\s+init\s*\(\s*\)\s*\{/.test(file.current)) return [];
+  const initBodies = file.current.matchAll(/\bfunc\s+init\s*\(\s*\)\s*\{([\s\S]*?)\n\}/g);
+  const signals: Signal[] = [];
+  for (const match of initBodies) {
+    const body = match[1] ?? "";
+    if (!/\b(?:http\.|sql\.Open|Dial|Must\(|os\.Exit|exec\.Command)/.test(body)) continue;
+    const line = file.current.slice(0, match.index ?? 0).split("\n").length;
+    signals.push({
+      ruleId: "go-cli.init-side-effects",
+      path: file.path,
+      line,
+      message: "Package init constructs clients or performs process/network side effects.",
+      snippet: "func init() { … }",
+      data: {},
+    });
+  }
+  return signals;
+}
+
+/** os.Args reads outside main.go entry files. */
+function osArgsOutsideMainSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  if (/(^|\/)main\.go$/.test(file.path.replaceAll("\\", "/"))) return [];
+  return lineSignals(
+    file,
+    "go-cli.os-args-outside-main",
+    /\bos\.Args\b/,
+    () => "This non-main package reads os.Args directly instead of injected arguments.",
+  );
+}
+
+/** Spinner/ANSI libraries without TTY guard in the same file. */
+function ansiNoTtySignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  if (/\b(?:term\.IsTerminal|isatty\.IsTerminal|IsTerminal\s*\()/.test(file.current)) {
+    return [];
+  }
+  return lineSignals(
+    file,
+    "go-cli.ansi-no-tty",
+    /\b(?:spinner\.|yacspin\.|briandowns\/spinner|\\033\[|\\x1b\[)/,
+    () => "This path uses spinner/ANSI output without an obvious TTY guard in the same file.",
+  );
+}
+
+/**
+ * git/docker/kubectl Command lines with a variable positional after fixed options
+ * and no `--` separator or validate helper in-file.
+ */
+function optionSmugglingSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  if (/\bvalidate(?:Rev|Ref|Arg)|rejectLeadingDash|LookPath/.test(file.current)) {
+    return [];
+  }
+  return lineSignals(
+    file,
+    "go-cli.option-smuggling-risk",
+    /\bexec\.Command(?:Context)?\s*\(\s*"(?:git|docker|kubectl|helm)"\s*,[^)]*\b\w+\s*\)/,
+    (match) => {
+      const line = match[0] ?? "";
+      if (line.includes(`"--"`) || line.includes(`"--",`)) return "";
+      // Require at least one string literal option and a trailing identifier arg.
+      if (!/"-[-\w]/.test(line) && !/"checkout"|"run"|"exec"|"get"/.test(line)) return "";
+      if (!/,\s*[a-zA-Z_]\w*\s*\)/.test(line)) return "";
+      return "This subprocess passes a variable argument into git/docker/kubectl without an obvious `--` or validator.";
+    },
+  ).filter((signal) => signal.message !== "");
 }
