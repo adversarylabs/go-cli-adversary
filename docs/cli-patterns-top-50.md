@@ -56,17 +56,17 @@ Derived from the “top 20 things a Go CLI should do” checklist, dogfood on `a
 | 16 | JSON schema not versioned (`schemaVersion` missing) | Breaking changes invisible | medium | good | **done** | Model json-contract priority |
 | 17 | Deprecated flag emits different schema than replacement | Silent migration landmine | hard | **best** | **done** | Model deprecation category |
 | 18 | Flag rename without alias / deprecation window | Hard breaks for users | medium | good | later | Flag definitions over time (diff-aware) |
-| 19 | Required / mutually exclusive flags not validated | Runtime fail after work starts | medium | good | planned | Cobra mark APIs or missing checks |
+| 19 | Required / mutually exclusive flags not validated | Runtime fail after work starts | medium | good | later | Needs structure-aware Cobra marks |
 | 20 | Config precedence unclear or re-parsed ad hoc | “Why did env win?” | hard | **best** | later | Viper/bind patterns |
 | 21 | Env vars without documented prefix | Collisions, surprise config | medium | good | later | `os.Getenv` / `AutomaticEnv` |
 | 22 | Effective config not printable in debug/verbose | Un-debuggable prod issues | hard | good | later | Soft; observation |
-| 23 | Version / build identity missing or always `dev` | Support and provenance fail | easy | good | planned | `Version`, `ldflags`, `ReadBuildInfo` |
-| 24 | Completions missing for public commands | Discoverability | medium | none | later | Cobra completion APIs |
+| 23 | Version / build identity missing or always `dev` | Support and provenance fail | easy | good | **done** | `go-cli.version-identity` |
+| 24 | Completions missing for public commands | Discoverability | medium | none | later | Soft / low ROI static |
 | 25 | Help/examples drift from real flags | Users copy-paste wrong | hard | good | later | Golden help tests / model vs flags |
-| 26 | Usage dumped on every runtime error | Noise; hides real error | medium | good | planned | Cobra `SilenceUsage` defaults |
+| 26 | Usage dumped on every runtime error | Noise; hides real error | medium | good | **done** | `go-cli.cobra-silence-usage` |
 | 27 | Errors lack action (“what to try”) | Support load | hard | **best** | later | Model judgment on error strings |
-| 28 | Usage errors not distinguished from runtime errors | Wrong exit code / help spam | medium | good | planned | Typed errors / `SilenceUsage` |
-| 29 | Bare `log.Printf` / `fmt.Println` for CLI UX | Uncontrolled streams | medium | good | planned | Prefer IO streams injection |
+| 28 | Usage errors not distinguished from runtime errors | Wrong exit code / help spam | medium | good | **done** | `go-cli.cobra-silence-usage` (+ exit codes) |
+| 29 | Bare `log.Printf` / `fmt.Println` for CLI UX | Uncontrolled streams | medium | good | **done** | `go-cli.bare-user-log` |
 | 30 | Secrets logged or printed in verbose mode | Credential leak | medium | good | **out** | Prefer secrets adversary; maybe light redaction check later |
 | 31 | Credential files without restrictive permissions | Local secret theft | medium | none | **out** | Secrets / OS adversary |
 | 32 | Network without timeout / budget | Hung CLI | medium | good | **done** | `go-cli.http-no-timeout` |
@@ -83,7 +83,7 @@ Derived from the “top 20 things a Go CLI should do” checklist, dogfood on `a
 | 43 | No composition root / deps injected | Unmaintainable monorepo CLI | hard | good | later | Observation / architecture |
 | 44 | Signal handling only on Unix assumptions | Windows/CI weirdness | medium | none | later | Build tags / signal files |
 | 45 | `filepath` vs URL `path` confusion | Cross-platform bugs | medium | good | later | Import misuse heuristics |
-| 46 | Missing `--format` / machine output for list/get | Can’t automate | hard | good | planned | Command inventory vs format flags |
+| 46 | Missing `--format` / machine output for list/get | Can’t automate | hard | good | **done** | `go-cli.json-without-format` |
 | 47 | Silent no-op success (empty branch, stub path) | Scripts think work happened | hard | **best** | **done** | Model prompt priority |
 | 48 | Timeout flags not wired to contexts | User `--timeout` ignored | medium | **best** | **done** | Model prompt priority |
 | 49 | Model/network broker uses `Background` for short calls | Cancel doesn’t stop paid/remote work | easy | good | **done** | `go-cli.cancellation` + model |
@@ -112,7 +112,7 @@ Derived from the “top 20 things a Go CLI should do” checklist, dogfood on `a
 **Shipped:** prompt priorities + schema categories `json-contract`, `deprecation`, `validation-order`, `dry-run` for **7, 9, 12, 15–17, 40, 47–50**. Anti-restatement of pure static lifecycle hits.
 
 ### Wave C — framework-aware static
-Cobra/urfave/Viper specific: **19, 20, 23, 24, 26, 46**.
+**Shipped:** **23, 26, 28, 29, 46** (`version-identity`, `cobra-silence-usage`, `bare-user-log`, `json-without-format`). **19–20, 24–25** remain later.
 
 ### Wave D — architecture / polish
 **41–45**, completions, help drift — mostly low severity or other adversaries.
