@@ -16504,6 +16504,66 @@ var domain = {
       whyItMatters: "Shell interpolation turns path and argument data into executable syntax and is a common injection boundary.",
       impact: "User-controlled paths or refs can escape the intended command and run arbitrary shell code.",
       recommendation: "Prefer exec.Command/CommandContext with an argv slice; avoid sh -c / bash -c unless the script is a constant."
+    },
+    {
+      id: "go-cli.exit-code-convention",
+      title: "Exit-code helper uses 2 as a catch-all runtime failure",
+      concern: "exit code 2 used as catch-all runtime failure",
+      category: "correctness",
+      severity: "medium",
+      confidence: "medium",
+      summary: (count) => `${count} exit-code path${count === 1 ? "" : "s"} use status 2 as a generic failure (conventionally usage).`,
+      whyItMatters: "Exit code 2 is conventionally reserved for usage/validation errors; runtime failures usually use 1.",
+      impact: "Automation that treats 2 as usage will mis-handle generic runtime failures.",
+      recommendation: "Map usage/validation errors to 2 and unclassified runtime failures to 1 (or a documented domain code)."
+    },
+    {
+      id: "go-cli.subprocess-stderr-discarded",
+      title: "Subprocess stdout is captured while stderr is discarded",
+      concern: "subprocess stderr discarded from diagnostics",
+      category: "reliability",
+      severity: "medium",
+      confidence: "medium",
+      summary: (count) => `${count} subprocess path${count === 1 ? "" : "s"} use Output() which discards child stderr.`,
+      whyItMatters: "Child process failures are hard to diagnose when stderr never reaches the user or logs.",
+      impact: "Failed git/docker/tool invocations surface only exit status without the tool's error text.",
+      recommendation: "Use CombinedOutput, attach cmd.Stderr to the CLI error stream, or capture stderr into the error message."
+    },
+    {
+      id: "go-cli.stdout-progress",
+      title: "Progress or diagnostics are written to stdout",
+      concern: "progress mixed onto the machine-readable stdout stream",
+      category: "correctness",
+      severity: "medium",
+      confidence: "medium",
+      summary: (count) => `${count} path${count === 1 ? "" : "s"} write progress-style diagnostics to stdout instead of stderr.`,
+      whyItMatters: "Pipelines and --format json consumers break when progress shares stdout with the payload.",
+      impact: "Scripts piping CLI output to jq or files receive corrupted machine output.",
+      recommendation: "Send progress, warnings, and status lines to stderr; keep stdout for the primary result."
+    },
+    {
+      id: "go-cli.interactive-no-tty",
+      title: "Interactive input is read without a non-TTY guard",
+      concern: "interactive prompts without non-TTY protection",
+      category: "reliability",
+      severity: "medium",
+      confidence: "medium",
+      summary: (count) => `${count} path${count === 1 ? "" : "s"} read interactive stdin without an obvious terminal guard.`,
+      whyItMatters: "CI and automation hang or fail unpredictably when prompts run without a TTY.",
+      impact: "Pipelines and non-interactive agents block on confirmations that never receive input.",
+      recommendation: "Guard prompts with term.IsTerminal (or equivalent) and require --yes/--force for non-interactive runs."
+    },
+    {
+      id: "go-cli.http-no-timeout",
+      title: "HTTP client has no timeout budget",
+      concern: "network clients without timeout budgets",
+      category: "reliability",
+      severity: "medium",
+      confidence: "high",
+      summary: (count) => `${count} HTTP client${count === 1 ? "" : "s"} are constructed without an explicit Timeout.`,
+      whyItMatters: "Hung network calls leave the CLI wedged with no user-visible deadline.",
+      impact: "Ctrl-C may still work if context is used, but default clients stall indefinitely on dead peers.",
+      recommendation: "Set http.Client.Timeout or always use request contexts with deadlines."
     }
   ],
   noRiskSummary: "The reviewed command paths preserve errors, cancellation, and process-boundary ownership.",
@@ -16520,7 +16580,12 @@ var domain = {
         ),
         ...cancellationSignals(file),
         ...subprocessSignals(file),
-        ...shellInterpolationSignals(file)
+        ...shellInterpolationSignals(file),
+        ...exitCodeConventionSignals(file),
+        ...subprocessStderrSignals(file),
+        ...stdoutProgressSignals(file),
+        ...interactiveNoTtySignals(file),
+        ...httpNoTimeoutSignals(file)
       ],
       positives: [
         ...positive(
@@ -16540,6 +16605,12 @@ var domain = {
           "go-cli.subprocess-context",
           /\bexec\.CommandContext\s*\(/,
           "Subprocesses inherit the command cancellation context."
+        ),
+        ...positive(
+          file,
+          "go-cli.http-timeout",
+          /http\.Client\{[^}]*Timeout\s*:/,
+          "HTTP clients set an explicit timeout budget."
         )
       ]
     };
@@ -16593,6 +16664,90 @@ function shellInterpolationSignals(file) {
     /\bexec\.Command(?:Context)?\s*\(\s*"(?:\/bin\/)?(?:ba)?sh"\s*,\s*"-c"/,
     () => "This command invokes a shell with -c to run a composed string."
   );
+}
+function exitCodeConventionSignals(file) {
+  if (isNonProductPath(file.path)) return [];
+  if (!/\bfunc\b[\s\S]{0,120}\b\w*ExitCode\w*\s*\(/.test(file.current)) return [];
+  return lineSignals(
+    file,
+    "go-cli.exit-code-convention",
+    /^\s*return\s+2\b/,
+    () => "This exit-code path returns 2, which is conventionally a usage error, as a fallback status."
+  );
+}
+function subprocessStderrSignals(file) {
+  if (isNonProductPath(file.path)) return [];
+  return lineSignals(
+    file,
+    "go-cli.subprocess-stderr-discarded",
+    /\.Output\s*\(\s*\)/,
+    () => "This subprocess uses Output(), which does not capture child stderr for diagnostics."
+  ).filter((signal) => !signal.snippet.includes("CombinedOutput"));
+}
+function stdoutProgressSignals(file) {
+  if (isNonProductPath(file.path)) return [];
+  const progressWord = /progress|spinner|download(?:ing)?|upload(?:ing)?|waiting|processing|please wait|% complete/i;
+  return [
+    ...lineSignals(
+      file,
+      "go-cli.stdout-progress",
+      /\bfmt\.(?:Fprint|Fprintf|Fprintln)\(\s*os\.Stdout\b/,
+      () => "This diagnostic is written to os.Stdout instead of stderr."
+    ),
+    ...lineSignals(
+      file,
+      "go-cli.stdout-progress",
+      /\bfmt\.(?:Print|Printf|Println)\(/,
+      (match) => {
+        const line = match.input ?? match[0] ?? "";
+        if (!progressWord.test(line)) return "";
+        return "This progress-style message is printed with fmt (stdout) instead of stderr.";
+      }
+    ).filter((signal) => signal.message !== "")
+  ];
+}
+function interactiveNoTtySignals(file) {
+  if (isNonProductPath(file.path)) return [];
+  if (/\b(?:term\.IsTerminal|isatty\.IsTerminal|IsTerminal\s*\()/.test(file.current)) {
+    return [];
+  }
+  return lineSignals(
+    file,
+    "go-cli.interactive-no-tty",
+    /\b(?:bufio\.New(?:Scanner|Reader)\(\s*os\.Stdin|fmt\.Scan(?:ln|f)?\s*\(|promptui\.|survey\.|golang\.org\/x\/term\.ReadPassword)/,
+    () => "This path reads interactive input without an obvious non-TTY guard in the same file."
+  );
+}
+function httpNoTimeoutSignals(file) {
+  if (isNonProductPath(file.path)) return [];
+  const singleLine = lineSignals(
+    file,
+    "go-cli.http-no-timeout",
+    /&?http\.Client\{\s*\}/,
+    () => "This http.Client has no Timeout field."
+  );
+  const multi = [];
+  const re = /&?http\.Client\{([^}]*)\}/gs;
+  let match;
+  while ((match = re.exec(file.current)) !== null) {
+    const body2 = match[1] ?? "";
+    if (/\bTimeout\s*:/.test(body2)) continue;
+    if (body2.trim() === "" && singleLine.length > 0) continue;
+    const line = file.current.slice(0, match.index).split("\n").length;
+    multi.push({
+      ruleId: "go-cli.http-no-timeout",
+      path: file.path,
+      line,
+      message: "This http.Client is constructed without an explicit Timeout.",
+      snippet: match[0].replace(/\s+/g, " ").trim().slice(0, 300),
+      data: {}
+    });
+  }
+  const byLine = /* @__PURE__ */ new Map();
+  for (const signal of [...singleLine, ...multi]) {
+    byLine.set(signal.line, signal);
+  }
+  return [...byLine.values()];
 }
 
 // src/parser.ts
