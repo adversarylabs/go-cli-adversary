@@ -457,40 +457,124 @@ function interactiveNoTtySignals(file: SourceRevision): Signal[] {
   );
 }
 
-/** http.Client composites with no Timeout field. */
+/**
+ * http.Client composites with no Timeout field.
+ * Brace-aware so nested structs (e.g. Transport: &http.Transport{...}) do not
+ * truncate the Client body before a sibling Timeout field.
+ */
 function httpNoTimeoutSignals(file: SourceRevision): Signal[] {
   if (isNonProductPath(file.path)) return [];
-  // Single-line empty or partial client without Timeout.
-  const singleLine = lineSignals(
-    file,
-    "go-cli.http-no-timeout",
-    /&?http\.Client\{\s*\}/,
-    () => "This http.Client has no Timeout field.",
-  );
-  // Multi-line: Client{ ... } block without Timeout: inside.
-  const multi: Signal[] = [];
-  const re = /&?http\.Client\{([^}]*)\}/gs;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(file.current)) !== null) {
-    const body = match[1] ?? "";
+  const signals: Signal[] = [];
+  const source = file.current;
+  const startRe = /&?http\.Client\{/g;
+  let startMatch: RegExpExecArray | null;
+  while ((startMatch = startRe.exec(source)) !== null) {
+    const openIndex = (startMatch.index ?? 0) + startMatch[0].length - 1; // index of '{'
+    const closed = readBalancedBraces(source, openIndex);
+    if (closed === undefined) continue;
+    const body = source.slice(openIndex + 1, closed);
     if (/\bTimeout\s*:/.test(body)) continue;
-    if (body.trim() === "" && singleLine.length > 0) continue; // already covered
-    const line = file.current.slice(0, match.index).split("\n").length;
-    multi.push({
+    const full = source.slice(startMatch.index ?? 0, closed + 1);
+    const line = source.slice(0, startMatch.index ?? 0).split("\n").length;
+    signals.push({
       ruleId: "go-cli.http-no-timeout",
       path: file.path,
       line,
-      message: "This http.Client is constructed without an explicit Timeout.",
-      snippet: match[0].replace(/\s+/g, " ").trim().slice(0, 300),
+      message:
+        body.trim() === ""
+          ? "This http.Client has no Timeout field."
+          : "This http.Client is constructed without an explicit Timeout.",
+      snippet: full.replace(/\s+/g, " ").trim().slice(0, 300),
       data: {},
     });
   }
-  // Dedupe by line
-  const byLine = new Map<number, Signal>();
-  for (const signal of [...singleLine, ...multi]) {
-    byLine.set(signal.line, signal);
+  return signals;
+}
+
+/** Return index of matching '}' for a '{' at openIndex, or undefined if unbalanced. */
+function readBalancedBraces(source: string, openIndex: number): number | undefined {
+  if (source[openIndex] !== "{") return undefined;
+  let depth = 0;
+  let inRaw = false;
+  let inInterp = false;
+  let inChar = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let escape = false;
+  for (let i = openIndex; i < source.length; i += 1) {
+    const ch = source[i]!;
+    const next = source[i + 1];
+    if (inLineComment) {
+      if (ch === "\n") inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (ch === "*" && next === "/") {
+        inBlockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+    if (inRaw) {
+      if (ch === "`") inRaw = false;
+      continue;
+    }
+    if (inInterp) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') inInterp = false;
+      continue;
+    }
+    if (inChar) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === "'") inChar = false;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      inLineComment = true;
+      i += 1;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      inBlockComment = true;
+      i += 1;
+      continue;
+    }
+    if (ch === "`") {
+      inRaw = true;
+      continue;
+    }
+    if (ch === '"') {
+      inInterp = true;
+      continue;
+    }
+    if (ch === "'") {
+      inChar = true;
+      continue;
+    }
+    if (ch === "{") {
+      depth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
   }
-  return [...byLine.values()];
+  return undefined;
 }
 
 /** Cobra command literals without SilenceUsage in the same file. */

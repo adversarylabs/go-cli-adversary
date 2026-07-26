@@ -17,11 +17,11 @@ checklist. Prefer high-confidence, evidence-backed findings over soft style note
 | Progress on stdout | Covered | `go-cli.stdout-progress` |
 | Interactive without TTY guard | Covered | `go-cli.interactive-no-tty` |
 | HTTP client no timeout | Covered | `go-cli.http-no-timeout` |
-| Validate before side effects | Planned | Model-first (Wave B) |
-| JSON / format contract skew | Partial | Model-first (Wave B) |
-| Version identity | Planned | Wave C |
-| Completions | Later | Wave D |
-| Config precedence | Later | Wave C/D |
+| Validate before side effects | Covered | Model prompt `validation-order` (Wave B) |
+| JSON / format contract skew | Covered | Model `json-contract` / `deprecation` + `go-cli.json-without-format` |
+| Version identity | Covered | `go-cli.version-identity` |
+| Completions | Later | Soft / low ROI static |
+| Config precedence | Later | Framework-specific |
 | Secrets / credential files | Out of scope | Prefer secrets adversary |
 | General Go style | Out of scope | Prefer go-project / go-security |
 
