@@ -71,15 +71,15 @@ Derived from the “top 20 things a Go CLI should do” checklist, dogfood on `a
 | 31 | Credential files without restrictive permissions | Local secret theft | medium | none | **out** | Secrets / OS adversary |
 | 32 | Network without timeout / budget | Hung CLI | medium | good | **done** | `go-cli.http-no-timeout` |
 | 33 | Long operations without progress on stderr | Looks wedged | hard | good | later | Soft UX |
-| 34 | Spinners / cursor control when not a TTY | Corrupts CI logs | medium | good | planned | `IsTerminal` + ANSI |
+| 34 | Spinners / cursor control when not a TTY | Corrupts CI logs | medium | good | **done** | `go-cli.ansi-no-tty` |
 | 35 | Subprocess stderr discarded | Undebuggable child failures | easy | good | **done** | `go-cli.subprocess-stderr-discarded` |
-| 36 | Path args not cleaned / can escape root | Path traversal | medium | good | planned | `filepath` join without base guard |
-| 37 | Git/docker args allow option smuggling (`-` prefixes) | Unexpected child behavior | medium | good | planned | Revision/path validators |
+| 36 | Path args not cleaned / can escape root | Path traversal | medium | good | later | Needs path-boundary analysis |
+| 37 | Git/docker args allow option smuggling (`-` prefixes) | Unexpected child behavior | medium | good | **done** | `go-cli.option-smuggling-risk` |
 | 38 | Concurrent store access without lock | Corrupt local state | hard | good | later | File lock patterns |
 | 39 | Mutating command not idempotent / leaves temp dirt | Partial failure pain | hard | **best** | later | Model on create/push flows |
 | 40 | Success exit when primary action failed | Silent automation green | hard | **best** | **done** | Model prompt + exit static |
-| 41 | `main` / `init` constructs global clients | Untestable, surprising side effects | medium | good | later | Soft architecture |
-| 42 | Commands not testable (`os.Args` only) | Regressions | hard | none | later | Testing adversary overlap |
+| 41 | `main` / `init` constructs global clients | Untestable, surprising side effects | medium | good | **done** | `go-cli.init-side-effects` |
+| 42 | Commands not testable (`os.Args` only) | Regressions | hard | none | **done** | `go-cli.os-args-outside-main` |
 | 43 | No composition root / deps injected | Unmaintainable monorepo CLI | hard | good | later | Observation / architecture |
 | 44 | Signal handling only on Unix assumptions | Windows/CI weirdness | medium | none | later | Build tags / signal files |
 | 45 | `filepath` vs URL `path` confusion | Cross-platform bugs | medium | good | later | Import misuse heuristics |
@@ -115,7 +115,7 @@ Derived from the “top 20 things a Go CLI should do” checklist, dogfood on `a
 **Shipped:** **23, 26, 28, 29, 46** (`version-identity`, `cobra-silence-usage`, `bare-user-log`, `json-without-format`). **19–20, 24–25** remain later.
 
 ### Wave D — architecture / polish
-**41–45**, completions, help drift — mostly low severity or other adversaries.
+**Shipped:** **34, 37, 41, 42** (`ansi-no-tty`, `option-smuggling-risk`, `init-side-effects`, `os-args-outside-main`). Remaining **later** rows stay documentation/low-ROI.
 
 ---
 
