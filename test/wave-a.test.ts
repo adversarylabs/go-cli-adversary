@@ -143,6 +143,52 @@ func client() *http.Client {
   assert.equal(good.filter((s) => s.ruleId === "go-cli.http-no-timeout").length, 0);
 });
 
+test("wave A: nested Transport + Timeout does not false-positive http-no-timeout", () => {
+  // Would fail with a naive /http.Client{([^}]*)}/ parse that stops at Transport's '}'.
+  const signals = domain.analyze({
+    path: "cmd/http.go",
+    current: `package cmd
+import (
+	"net/http"
+	"time"
+)
+func client(transport http.RoundTripper) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			MaxIdleConns: 100,
+		},
+		Timeout: 30 * time.Second,
+	}
+}
+`,
+    changedLines: new Set(),
+    status: "repository",
+  }).signals;
+  assert.equal(
+    signals.filter((s) => s.ruleId === "go-cli.http-no-timeout").length,
+    0,
+    "Timeout after nested Transport must be recognized",
+  );
+});
+
+test("wave A: nested Transport without Timeout still fires", () => {
+  const signals = domain.analyze({
+    path: "cmd/http.go",
+    current: `package cmd
+import "net/http"
+func client(transport http.RoundTripper) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+	}
+}
+`,
+    changedLines: new Set(),
+    status: "repository",
+  }).signals;
+  assert.ok(signals.some((s) => s.ruleId === "go-cli.http-no-timeout"));
+});
+
 test("wave A: end-to-end review surfaces new rules without exit-bypass on main ExitCode", async () => {
   const root = await writeTree({
     "main.go": `package main

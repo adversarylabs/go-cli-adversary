@@ -16836,34 +16836,112 @@ function interactiveNoTtySignals(file) {
 }
 function httpNoTimeoutSignals(file) {
   if (isNonProductPath(file.path)) return [];
-  const singleLine = lineSignals(
-    file,
-    "go-cli.http-no-timeout",
-    /&?http\.Client\{\s*\}/,
-    () => "This http.Client has no Timeout field."
-  );
-  const multi = [];
-  const re = /&?http\.Client\{([^}]*)\}/gs;
-  let match;
-  while ((match = re.exec(file.current)) !== null) {
-    const body2 = match[1] ?? "";
+  const signals = [];
+  const source = file.current;
+  const startRe = /&?http\.Client\{/g;
+  let startMatch;
+  while ((startMatch = startRe.exec(source)) !== null) {
+    const openIndex = (startMatch.index ?? 0) + startMatch[0].length - 1;
+    const closed = readBalancedBraces(source, openIndex);
+    if (closed === void 0) continue;
+    const body2 = source.slice(openIndex + 1, closed);
     if (/\bTimeout\s*:/.test(body2)) continue;
-    if (body2.trim() === "" && singleLine.length > 0) continue;
-    const line = file.current.slice(0, match.index).split("\n").length;
-    multi.push({
+    const full = source.slice(startMatch.index ?? 0, closed + 1);
+    const line = source.slice(0, startMatch.index ?? 0).split("\n").length;
+    signals.push({
       ruleId: "go-cli.http-no-timeout",
       path: file.path,
       line,
-      message: "This http.Client is constructed without an explicit Timeout.",
-      snippet: match[0].replace(/\s+/g, " ").trim().slice(0, 300),
+      message: body2.trim() === "" ? "This http.Client has no Timeout field." : "This http.Client is constructed without an explicit Timeout.",
+      snippet: full.replace(/\s+/g, " ").trim().slice(0, 300),
       data: {}
     });
   }
-  const byLine = /* @__PURE__ */ new Map();
-  for (const signal of [...singleLine, ...multi]) {
-    byLine.set(signal.line, signal);
+  return signals;
+}
+function readBalancedBraces(source, openIndex) {
+  if (source[openIndex] !== "{") return void 0;
+  let depth = 0;
+  let inRaw = false;
+  let inInterp = false;
+  let inChar = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let escape2 = false;
+  for (let i2 = openIndex; i2 < source.length; i2 += 1) {
+    const ch = source[i2];
+    const next = source[i2 + 1];
+    if (inLineComment) {
+      if (ch === "\n") inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (ch === "*" && next === "/") {
+        inBlockComment = false;
+        i2 += 1;
+      }
+      continue;
+    }
+    if (inRaw) {
+      if (ch === "`") inRaw = false;
+      continue;
+    }
+    if (inInterp) {
+      if (escape2) {
+        escape2 = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape2 = true;
+        continue;
+      }
+      if (ch === '"') inInterp = false;
+      continue;
+    }
+    if (inChar) {
+      if (escape2) {
+        escape2 = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape2 = true;
+        continue;
+      }
+      if (ch === "'") inChar = false;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      inLineComment = true;
+      i2 += 1;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      inBlockComment = true;
+      i2 += 1;
+      continue;
+    }
+    if (ch === "`") {
+      inRaw = true;
+      continue;
+    }
+    if (ch === '"') {
+      inInterp = true;
+      continue;
+    }
+    if (ch === "'") {
+      inChar = true;
+      continue;
+    }
+    if (ch === "{") {
+      depth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return i2;
+    }
   }
-  return [...byLine.values()];
+  return void 0;
 }
 function cobraSilenceUsageSignals(file) {
   if (isNonProductPath(file.path)) return [];
