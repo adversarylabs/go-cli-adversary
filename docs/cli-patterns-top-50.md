@@ -95,11 +95,10 @@ Derived from the “top 20 things a Go CLI should do” checklist, dogfood on `a
 
 | Status | Count (approx) | What it means |
 | --- | --- | --- |
-| **done** | 11 | Shipped static rules (+ model for narrative) |
-| **partial** | 6 | Static or model touches it; needs stronger productization |
-| **planned** | ~15 | Next implementation waves |
-| **later** | ~12 | Valuable but lower confidence or softer UX |
-| **out** | 2 | Own elsewhere (secrets / generic Go) |
+| **done** | ~32 | Static rules and/or model prompt/schema coverage |
+| **partial** | ~1 | Soft model-only destructive-command guidance |
+| **later** | ~13 | High FP risk or low ROI static |
+| **out** | 2 | Secrets / credential files (other adversaries) |
 
 ---
 
