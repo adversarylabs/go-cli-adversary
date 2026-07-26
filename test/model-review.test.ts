@@ -565,3 +565,53 @@ func run() error { return nil }
   assert.doesNotMatch(result.opinion?.summary ?? "", /ship this as-is/i);
   assert.ok(model.requests.some((request) => isConcernRewriteRequest(request)));
 });
+
+test("wave B: model prompt prioritizes contract stories and schema allows new categories", () => {
+  assert.match(GO_CLI_MODEL_PROMPT, /Silent success/);
+  assert.match(GO_CLI_MODEL_PROMPT, /Dry-run/);
+  assert.match(GO_CLI_MODEL_PROMPT, /JSON \/ machine-output contract skew/);
+  assert.match(GO_CLI_MODEL_PROMPT, /Do NOT restate static lifecycle hits/);
+  const categories = (
+    GO_CLI_MODEL_SCHEMA as {
+      properties: { observations: { items: { properties: { category: { enum: string[] } } } } };
+    }
+  ).properties.observations.items.properties.category.enum;
+  for (const needed of ["json-contract", "deprecation", "validation-order", "dry-run"]) {
+    assert.ok(categories.includes(needed), `missing category ${needed}`);
+  }
+});
+
+test("wave B: json-contract observation is accepted and framed in opinion when primary", async () => {
+  const root = await writeCliFixture("wave-b-json", {
+    "cmd/list.go": `package cmd
+func run() error { return nil }
+`,
+  });
+  const model = capturingModel({
+    assessment: {
+      risk: "medium",
+      summary: "Store subcommands emit raw JSON while list uses a versioned envelope.",
+    },
+    ship: false,
+    primaryConcern: "inconsistent machine-readable output contracts",
+    observations: [
+      {
+        id: "json-skew",
+        title: "store vs list JSON envelope skew",
+        category: "json-contract",
+        severity: "medium",
+        confidence: "high",
+        summary: "store check encodes raw DTOs; list wraps schemaVersion.",
+        whyItMatters: "Scripts parsing one shape break on the other command family.",
+        recommendation: "Use one versioned envelope for all machine output.",
+        evidenceIds: ["file:cmd/list.go"],
+      },
+    ],
+  });
+  const result = await runWithModel(root, model);
+  assert.equal(result.opinion?.ship, false);
+  assert.match(result.opinion?.summary ?? "", /inconsistent machine-readable output contracts|json/i);
+  assert.ok(
+    result.observations.some((n) => n.key?.includes("json-skew") || (n.summary ?? "").includes("JSON")),
+  );
+});

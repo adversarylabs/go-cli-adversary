@@ -44,17 +44,17 @@ Derived from the “top 20 things a Go CLI should do” checklist, dogfood on `a
 | 4 | Handler uses `context.Background` / `TODO` instead of `cmd.Context()` | Ctrl+C won’t cancel work | easy | good | **done** | `go-cli.cancellation` (skip root `NotifyContext`) |
 | 5 | `exec.Command` without `CommandContext` | Orphan children on cancel/timeout | easy | good | **done** | `go-cli.subprocess-no-context` |
 | 6 | Shell `sh -c` / `bash -c` with composed strings | Injection / arg smuggling | easy | good | **done** | `go-cli.shell-interpolation` |
-| 7 | Validation after side effects (network/write before flag checks) | Partial work on bad input | hard | **best** | planned | Structure-aware or model path order |
+| 7 | Validation after side effects (network/write before flag checks) | Partial work on bad input | hard | **best** | **done** | Model prompt: validation-order category |
 | 8 | Progress / logs on stdout mixed with machine payload | Breaks pipes (`jq`, scripts) | medium | **best** | **done** | `go-cli.stdout-progress` (+ model for mixed JSON) |
-| 9 | JSON and human text on same stream without mode switch | Silent parse failures | medium | **best** | partial | Static stdout-progress; model for format skew |
+| 9 | JSON and human text on same stream without mode switch | Silent parse failures | medium | **best** | **done** | Model json-contract + static stdout-progress |
 | 10 | Interactive prompt without TTY / non-interactive guard | Hang or fail in CI | medium | **best** | **done** | `go-cli.interactive-no-tty` |
-| 11 | Destructive command without `--yes` / `--force` / dry-run | Accidental data loss | medium | **best** | planned | Mutating command names + flags |
-| 12 | `--dry-run` overridden by other flags silently | User thinks apply ran | hard | **best** | planned | Model found store gc case |
+| 11 | Destructive command without `--yes` / `--force` / dry-run | Accidental data loss | medium | **best** | partial | Model dry-run / interactive categories |
+| 12 | `--dry-run` overridden by other flags silently | User thinks apply ran | hard | **best** | **done** | Model dry-run category + prompt priority |
 | 13 | Exit code 2 used as catch-all runtime failure | Conflicts with usage-error convention | medium | good | **done** | `go-cli.exit-code-convention` |
 | 14 | Undocumented / unstable domain exit codes | Automation can’t branch | hard | good | later | Needs docs + code agreement |
-| 15 | Inconsistent JSON envelope across commands | Scripts break by subcommand | hard | **best** | partial | Model: store raw vs versioned envelope |
-| 16 | JSON schema not versioned (`schemaVersion` missing) | Breaking changes invisible | medium | good | planned | Encoder sites + DTO shapes |
-| 17 | Deprecated flag emits different schema than replacement | Silent migration landmine | hard | **best** | partial | Model: `--json` vs `--format json` |
+| 15 | Inconsistent JSON envelope across commands | Scripts break by subcommand | hard | **best** | **done** | Model json-contract category |
+| 16 | JSON schema not versioned (`schemaVersion` missing) | Breaking changes invisible | medium | good | **done** | Model json-contract priority |
+| 17 | Deprecated flag emits different schema than replacement | Silent migration landmine | hard | **best** | **done** | Model deprecation category |
 | 18 | Flag rename without alias / deprecation window | Hard breaks for users | medium | good | later | Flag definitions over time (diff-aware) |
 | 19 | Required / mutually exclusive flags not validated | Runtime fail after work starts | medium | good | planned | Cobra mark APIs or missing checks |
 | 20 | Config precedence unclear or re-parsed ad hoc | “Why did env win?” | hard | **best** | later | Viper/bind patterns |
@@ -77,17 +77,17 @@ Derived from the “top 20 things a Go CLI should do” checklist, dogfood on `a
 | 37 | Git/docker args allow option smuggling (`-` prefixes) | Unexpected child behavior | medium | good | planned | Revision/path validators |
 | 38 | Concurrent store access without lock | Corrupt local state | hard | good | later | File lock patterns |
 | 39 | Mutating command not idempotent / leaves temp dirt | Partial failure pain | hard | **best** | later | Model on create/push flows |
-| 40 | Success exit when primary action failed | Silent automation green | hard | **best** | partial | Overlaps exit-bypass + model |
+| 40 | Success exit when primary action failed | Silent automation green | hard | **best** | **done** | Model prompt + exit static |
 | 41 | `main` / `init` constructs global clients | Untestable, surprising side effects | medium | good | later | Soft architecture |
 | 42 | Commands not testable (`os.Args` only) | Regressions | hard | none | later | Testing adversary overlap |
 | 43 | No composition root / deps injected | Unmaintainable monorepo CLI | hard | good | later | Observation / architecture |
 | 44 | Signal handling only on Unix assumptions | Windows/CI weirdness | medium | none | later | Build tags / signal files |
 | 45 | `filepath` vs URL `path` confusion | Cross-platform bugs | medium | good | later | Import misuse heuristics |
 | 46 | Missing `--format` / machine output for list/get | Can’t automate | hard | good | planned | Command inventory vs format flags |
-| 47 | Silent no-op success (empty branch, stub path) | Scripts think work happened | hard | **best** | partial | Model: api v1/v2 empty branches |
-| 48 | Timeout flags not wired to contexts | User `--timeout` ignored | medium | **best** | partial | Model: broker 2s vs user timeout |
-| 49 | Model/network broker uses `Background` for short calls | Cancel doesn’t stop paid/remote work | easy | good | **partial** | Hits `go-cli.cancellation` today |
-| 50 | Registry/auth helper ignores caller context | Push/pull uncancellable | easy | good | **partial** | Same rule; dogfood OCI auth |
+| 47 | Silent no-op success (empty branch, stub path) | Scripts think work happened | hard | **best** | **done** | Model prompt priority |
+| 48 | Timeout flags not wired to contexts | User `--timeout` ignored | medium | **best** | **done** | Model prompt priority |
+| 49 | Model/network broker uses `Background` for short calls | Cancel doesn’t stop paid/remote work | easy | good | **done** | `go-cli.cancellation` + model |
+| 50 | Registry/auth helper ignores caller context | Push/pull uncancellable | easy | good | **done** | `go-cli.cancellation` + model |
 
 ---
 
@@ -106,14 +106,10 @@ Derived from the “top 20 things a Go CLI should do” checklist, dogfood on `a
 ## Suggested implementation waves
 
 ### Wave A — contract credibility (static + light model)
-**Shipped:** **1–6**, taste filters, top-3 findings, opinion rewrite, plus **8, 10, 13, 32, 35** (`stdout-progress`, `interactive-no-tty`, `exit-code-convention`, `http-no-timeout`, `subprocess-stderr-discarded`). **9** remains partial (model).
+**Shipped:** **1–6**, taste filters, top-3 findings, opinion rewrite, plus **8, 10, 13, 32, 35**.
 
 ### Wave B — model-first contract stories
-Schema already has categories for flags, streams, exit, automation.
-
-Prompt + schema emphasis for: **7, 12, 15–17, 40, 47–48** (silent success, dry-run override, JSON/deprecation skew).
-
-Keep model observations **non-duplicative** of static titles when possible.
+**Shipped:** prompt priorities + schema categories `json-contract`, `deprecation`, `validation-order`, `dry-run` for **7, 9, 12, 15–17, 40, 47–50**. Anti-restatement of pure static lifecycle hits.
 
 ### Wave C — framework-aware static
 Cobra/urfave/Viper specific: **19, 20, 23, 24, 26, 46**.
