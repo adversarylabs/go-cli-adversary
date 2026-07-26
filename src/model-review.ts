@@ -28,7 +28,16 @@ Focus only on Go CLI engineering that affects users of the CLI:
 - scripting and automation compatibility
 - completion of related CLI code paths
 
+Prioritize these high-value contract stories when evidence supports them (prefer novel insights over restating deterministic signals already listed):
+1. Validation after side effects — network/write/process launch before flag/arg validation fails.
+2. Silent success / no-op paths — empty branches, stub handlers, or missing cases that still return nil / exit 0.
+3. Dry-run / apply / force flag interactions that silently ignore user intent.
+4. JSON / machine-output contract skew — raw Encode vs versioned envelope; deprecated flags emitting different schemas than replacements (--json vs --format json).
+5. Success exit when the primary action failed, or exit-code conventions that break automation.
+6. User-facing timeouts/flags not wired into contexts used for network or child work.
+
 Do NOT review generic Go style, broad security, observability, databases, or general engineering quality unless it directly breaks the CLI contract.
+Do NOT restate static lifecycle hits (os.Exit, exec.Command without context, context.Background in handlers) unless you add a user-impact angle the static title misses.
 
 Use only the prepared evidence and source excerpts. Cite evidence with the provided evidence IDs.
 Return a small number of high-confidence observations (zero is valid). Prefer severity that matches user impact.
@@ -36,7 +45,8 @@ Return a small number of high-confidence observations (zero is valid). Prefer se
 For each observation.title use a short headline. Prefer noun phrases when possible.
 If you set primaryConcern, it must be a short noun phrase suitable after \"I would address …\"
 (for example \"forced exit code 124\" or \"silent no-op v1 paths\"), never a full sentence,
-clause, or slash-separated method list.`;
+clause, or slash-separated method list.
+When category is json-contract or deprecation, name the concrete flag or command family in the title.`;
 
 /** Strict, provider-compatible JSON Schema for structured Go CLI model output. */
 export const GO_CLI_MODEL_SCHEMA: Record<string, unknown> = {
@@ -91,6 +101,10 @@ export const GO_CLI_MODEL_SCHEMA: Record<string, unknown> = {
               "errors",
               "automation",
               "completeness",
+              "json-contract",
+              "deprecation",
+              "validation-order",
+              "dry-run",
             ],
           },
           severity: {
@@ -483,6 +497,14 @@ function categoryConcern(category: string): string | undefined {
       return "incorrect command behavior";
     case "interactive":
       return "interactive versus non-interactive contract issues";
+    case "json-contract":
+      return "inconsistent machine-readable output contracts";
+    case "deprecation":
+      return "deprecated flag output contract skew";
+    case "validation-order":
+      return "validation after irreversible side effects";
+    case "dry-run":
+      return "dry-run and apply flag interaction bugs";
     default:
       return undefined;
   }
