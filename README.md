@@ -34,3 +34,7 @@ Five graded fixtures own expected review snapshots. The 61-repository benchmark 
 ## Development
 
 Run `npm test`, `adversary validate .`, and `adversary pack --check .`.
+
+## Project
+
+Source is available in the [Go CLI adversary repository](https://github.com/adversarylabs/go-cli-adversary). Go CLI is licensed under the [MIT License](LICENSE).
