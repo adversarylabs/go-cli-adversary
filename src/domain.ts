@@ -157,6 +157,62 @@ export const domain: DomainDefinition = {
       impact: "Ctrl-C may still work if context is used, but default clients stall indefinitely on dead peers.",
       recommendation: "Set http.Client.Timeout or always use request contexts with deadlines.",
     },
+    {
+      id: "go-cli.cobra-silence-usage",
+      title: "Cobra command does not silence usage on runtime errors",
+      concern: "usage dumped on runtime command failures",
+      category: "correctness",
+      severity: "low",
+      confidence: "medium",
+      summary: (count) =>
+        `${count} Cobra command definition${count === 1 ? "" : "s"} omit SilenceUsage for runtime failures.`,
+      whyItMatters:
+        "Printing full usage on every runtime error hides the real failure and confuses automation logs.",
+      impact: "Operators and CI logs fill with flag help instead of the actionable error.",
+      recommendation:
+        "Set SilenceUsage: true on the root (and typically subcommands), and only show usage for parse/validation errors.",
+    },
+    {
+      id: "go-cli.version-identity",
+      title: "CLI root lacks an inspectable version identity",
+      concern: "missing version or build identity on the CLI root",
+      category: "reliability",
+      severity: "low",
+      confidence: "medium",
+      summary: (count) =>
+        `${count} CLI root definition${count === 1 ? "" : "s"} have no Version field or version helper reference.`,
+      whyItMatters: "Support and release verification require a stable --version / Version surface.",
+      impact: "Users and automation cannot tell which build failed in the field.",
+      recommendation:
+        "Set cobra.Command.Version (or urfave Version) from ldflags / runtime/debug.ReadBuildInfo.",
+    },
+    {
+      id: "go-cli.json-without-format",
+      title: "JSON is written to stdout without an obvious format switch",
+      concern: "machine JSON without a format or json flag in the same file",
+      category: "correctness",
+      severity: "medium",
+      confidence: "medium",
+      summary: (count) =>
+        `${count} path${count === 1 ? "" : "s"} encode JSON to stdout without a local format/json flag switch.`,
+      whyItMatters: "List/get commands need a stable machine mode; mixed human+JSON without a switch breaks scripts.",
+      impact: "Callers cannot reliably select machine-readable output for the command.",
+      recommendation:
+        "Gate JSON encoding on --format json / --json (or always emit a documented machine contract).",
+    },
+    {
+      id: "go-cli.bare-user-log",
+      title: "Bare log package used for CLI user messaging",
+      concern: "uncontrolled log package output for CLI UX",
+      category: "correctness",
+      severity: "low",
+      confidence: "medium",
+      summary: (count) =>
+        `${count} path${count === 1 ? "" : "s"} use log.Print/Fatal-style messaging for CLI output.`,
+      whyItMatters: "The log package prefixes and stream defaults fight intentional stdout/stderr contracts.",
+      impact: "User messages appear on the wrong stream or with unwanted prefixes.",
+      recommendation: "Write user-facing text via injected IO streams (stderr/stdout), not log.Printf.",
+    },
   ],
   noRiskSummary: "The reviewed command paths preserve errors, cancellation, and process-boundary ownership.",
   approvalSummary: "I would approve the reviewed CLI lifecycle and automation behavior.",
@@ -178,6 +234,10 @@ export const domain: DomainDefinition = {
         ...stdoutProgressSignals(file),
         ...interactiveNoTtySignals(file),
         ...httpNoTimeoutSignals(file),
+        ...cobraSilenceUsageSignals(file),
+        ...versionIdentitySignals(file),
+        ...jsonWithoutFormatSignals(file),
+        ...bareUserLogSignals(file),
       ],
       positives: [
         ...positive(
@@ -203,6 +263,18 @@ export const domain: DomainDefinition = {
           "go-cli.http-timeout",
           /http\.Client\{[^}]*Timeout\s*:/,
           "HTTP clients set an explicit timeout budget.",
+        ),
+        ...positive(
+          file,
+          "go-cli.silence-usage",
+          /\bSilenceUsage\s*:\s*true/,
+          "Cobra usage output is silenced for runtime failures.",
+        ),
+        ...positive(
+          file,
+          "go-cli.version-set",
+          /\bVersion\s*:/,
+          "The command surface exposes a Version identity field.",
         ),
       ],
     };
@@ -363,4 +435,70 @@ function httpNoTimeoutSignals(file: SourceRevision): Signal[] {
     byLine.set(signal.line, signal);
   }
   return [...byLine.values()];
+}
+
+/** Cobra command literals without SilenceUsage in the same file. */
+function cobraSilenceUsageSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  if (!/\bcobra\.Command\s*\{/.test(file.current)) return [];
+  if (/\bSilenceUsage\s*:/.test(file.current)) return [];
+  if (!/\bUse\s*:/.test(file.current)) return [];
+  return contentSignal(
+    file,
+    "go-cli.cobra-silence-usage",
+    /\bcobra\.Command\s*\{/,
+    "This Cobra command definition does not set SilenceUsage, so runtime errors may dump usage text.",
+  );
+}
+
+/** Root CLI files with Cobra/urfave but no Version identity. */
+function versionIdentitySignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  const path = file.path.replaceAll("\\", "/");
+  if (!/(^|\/)(main\.go|cmd\/root\.go|cli\/root\.go|internal\/(?:cmd|cli)\/root\.go)$/.test(path)) {
+    return [];
+  }
+  const isFramework =
+    /\bcobra\.Command\b/.test(file.current) ||
+    /\bcli\.(?:New)?App\b/.test(file.current) ||
+    /urfave\/cli/.test(file.current);
+  if (!isFramework) return [];
+  if (/\bVersion\s*:/.test(file.current)) return [];
+  if (/\bversion\.(?:Version|String|Get|Info)\b/.test(file.current)) return [];
+  if (/debug\.ReadBuildInfo\s*\(/.test(file.current)) return [];
+  return contentSignal(
+    file,
+    "go-cli.version-identity",
+    /\bcobra\.Command\b|\bcli\.(?:New)?App\b/,
+    "This CLI root does not set Version or reference a version helper / ReadBuildInfo.",
+  );
+}
+
+/** JSON encoded to stdout without a local format/json flag switch. */
+function jsonWithoutFormatSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  if (
+    /\b(?:format|Format)\b/.test(file.current) &&
+    /json|JSON|StringVar|Flags\(\)|PersistentFlags/.test(file.current)
+  ) {
+    return [];
+  }
+  if (/\b--json\b|"json"|String\("json"/.test(file.current)) return [];
+  return lineSignals(
+    file,
+    "go-cli.json-without-format",
+    /json\.NewEncoder\(\s*os\.Stdout\b/,
+    () => "JSON is encoded to os.Stdout without an obvious --format/--json switch in this file.",
+  );
+}
+
+/** Bare log.Print* used for user-facing messaging (not Fatal — covered by exit-bypass). */
+function bareUserLogSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  return lineSignals(
+    file,
+    "go-cli.bare-user-log",
+    /\blog\.(?:Print|Printf|Println)\s*\(/,
+    () => "This path uses the log package for messaging instead of explicit stdout/stderr writes.",
+  );
 }
