@@ -1,0 +1,11 @@
+src/
+test/
+fixtures/
+benchmarks/
+scripts/
+coverage/
+.depot/
+tsconfig.json
+AGENTS.md
+CHECKS.md
+.gitignore

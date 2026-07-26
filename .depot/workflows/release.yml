@@ -68,7 +68,7 @@ jobs:
       - name: Push adversary
         uses: adversarylabs/actions/push@db157870effc0c6c4f254b315514cb7d0fc74a2a
         with:
-          cli-version: 2026.7.25
+          cli-version: 2026.7.26
           path: .
           token: ${{ secrets.ADVERSARY_SERVICE_ACCOUNT_TOKEN }}
           registry-namespace: adversarylabs

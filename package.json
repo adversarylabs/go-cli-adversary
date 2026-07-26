@@ -1,8 +1,14 @@
 {
   "name": "go-cli",
   "version": "0.0.12",
+  "description": "Reviews Go command-line applications for predictable configuration, cancellation, diagnostics, and exit behavior.",
   "type": "module",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adversarylabs/go-cli-adversary.git"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit && node scripts/build.mjs",
     "prepare": "npm run build",
