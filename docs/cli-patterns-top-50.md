@@ -106,14 +106,10 @@ Derived from the “top 20 things a Go CLI should do” checklist, dogfood on `a
 ## Suggested implementation waves
 
 ### Wave A — contract credibility (static + light model)
-**Shipped:** **1–6**, taste filters, top-3 findings, opinion rewrite, plus **8, 10, 13, 32, 35** (`stdout-progress`, `interactive-no-tty`, `exit-code-convention`, `http-no-timeout`, `subprocess-stderr-discarded`). **9** remains partial (model).
+**Shipped:** **1–6**, taste filters, top-3 findings, opinion rewrite, plus **8, 10, 13, 32, 35**.
 
 ### Wave B — model-first contract stories
-Schema already has categories for flags, streams, exit, automation.
-
-Prompt + schema emphasis for: **7, 12, 15–17, 40, 47–48** (silent success, dry-run override, JSON/deprecation skew).
-
-Keep model observations **non-duplicative** of static titles when possible.
+**Shipped:** prompt priorities + schema categories `json-contract`, `deprecation`, `validation-order`, `dry-run` for **7, 9, 12, 15–17, 40, 47–50**. Anti-restatement of pure static lifecycle hits.
 
 ### Wave C — framework-aware static
 Cobra/urfave/Viper specific: **19, 20, 23, 24, 26, 46**.
