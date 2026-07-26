@@ -1,5 +1,5 @@
 name: go-cli
-version: 0.0.11
+version: 0.0.12
 description: Reviews Go command-line applications for predictable configuration, cancellation, diagnostics, and exit behavior.
 
 triggers:
