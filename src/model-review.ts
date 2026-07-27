@@ -35,6 +35,8 @@ Prioritize these high-value contract stories when evidence supports them (prefer
 4. JSON / machine-output contract skew — raw Encode vs versioned envelope; deprecated flags emitting different schemas than replacements (--json vs --format json).
 5. Success exit when the primary action failed, or exit-code conventions that break automation.
 6. User-facing timeouts/flags not wired into contexts used for network or child work.
+7. Broad process kills (pkill -f) and forced destructive infra commands without dry-run/confirm.
+8. Long-running children (port-forward/tunnel) started without PID ownership or stop path.
 
 Do NOT review generic Go style, broad security, observability, databases, or general engineering quality unless it directly breaks the CLI contract.
 Do NOT restate static lifecycle hits (os.Exit, exec.Command without context, context.Background in handlers) unless you add a user-impact angle the static title misses.
@@ -105,6 +107,8 @@ export const GO_CLI_MODEL_SCHEMA: Record<string, unknown> = {
               "deprecation",
               "validation-order",
               "dry-run",
+              "process-ownership",
+              "destructive-ops",
             ],
           },
           severity: {

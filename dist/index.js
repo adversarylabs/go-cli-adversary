@@ -16660,6 +16660,42 @@ var domain = {
       whyItMatters: "Unvalidated refs can be interpreted as child-process flags (`-x`).",
       impact: "User-controlled revision strings can change child tool behavior unexpectedly.",
       recommendation: "Validate refs (reject leading `-` / NUL) or use `--` before positional args."
+    },
+    {
+      id: "go-cli.broad-process-kill",
+      title: "Process cleanup uses a broad pattern kill",
+      concern: "broad pattern-based process kills",
+      category: "reliability",
+      severity: "high",
+      confidence: "high",
+      summary: (count) => `${count} path${count === 1 ? "" : "s"} invoke pkill/killall with a broad match that can affect unrelated processes.`,
+      whyItMatters: "Dev-environment CLIs often manage long-lived children; pattern kills are not ownership-safe.",
+      impact: "Unrelated kubectl, docker, or user processes can be terminated on shared developer machines.",
+      recommendation: "Track child PIDs you started and signal those process groups; avoid pkill -f against shared tool names."
+    },
+    {
+      id: "go-cli.destructive-force",
+      title: "A destructive infrastructure command is forced without a dry-run path",
+      concern: "forced destructive infrastructure commands",
+      category: "reliability",
+      severity: "medium",
+      confidence: "medium",
+      summary: (count) => `${count} destructive command path${count === 1 ? "" : "s"} pass -f/--force without an adjacent dry-run or confirmation guard in-file.`,
+      whyItMatters: "Destroy, delete, and volume-rm operations need an explicit safety valve for automation mistakes.",
+      impact: "A single flag typo or scripted call can delete VMs, volumes, or clusters irreversibly.",
+      recommendation: "Require --yes/--force explicitly documented, default to confirmation on TTY, and offer --dry-run for multi-step destroy."
+    },
+    {
+      id: "go-cli.orphan-long-running-child",
+      title: "A long-running child is started without recorded ownership",
+      concern: "long-running children without ownership tracking",
+      category: "reliability",
+      severity: "medium",
+      confidence: "medium",
+      summary: (count) => `${count} long-running child start${count === 1 ? "" : "s"} lack an in-file PID file or Wait ownership pattern.`,
+      whyItMatters: "Port-forwards, tunnels, and watchers must be stoppable by later CLI commands.",
+      impact: "Stop/destroy leaves orphaned tunnels that still bind ports or hold cluster credentials.",
+      recommendation: "Record the child PID/process group when starting long-lived helpers and wait or signal that owner on stop."
     }
   ],
   noRiskSummary: "The reviewed command paths preserve errors, cancellation, and process-boundary ownership.",
@@ -16689,7 +16725,10 @@ var domain = {
         ...initSideEffectSignals(file),
         ...osArgsOutsideMainSignals(file),
         ...ansiNoTtySignals(file),
-        ...optionSmugglingSignals(file)
+        ...optionSmugglingSignals(file),
+        ...broadProcessKillSignals(file),
+        ...destructiveForceSignals(file),
+        ...orphanLongRunningChildSignals(file)
       ],
       positives: [
         ...positive(
@@ -17054,6 +17093,39 @@ function optionSmugglingSignals(file) {
       return "This subprocess passes a variable argument into git/docker/kubectl without an obvious `--` or validator.";
     }
   ).filter((signal) => signal.message !== "");
+}
+function broadProcessKillSignals(file) {
+  return lineSignals(
+    file,
+    "go-cli.broad-process-kill",
+    /\bpkill\b|\bkillall\b/,
+    () => "This path kills processes by name or pattern rather than an owned PID."
+  );
+}
+function destructiveForceSignals(file) {
+  const destructive = /\b(?:delete|destroy|rm|purge|reset)\b/i.test(file.current);
+  if (!destructive) return [];
+  const hasDryRun = /dry-?run|confirm|prompt|IsTerminal|term\.IsTerminal|--yes/i.test(file.current);
+  if (hasDryRun) return [];
+  return lineSignals(
+    file,
+    "go-cli.destructive-force",
+    /\s(?:-f|--force)\b/,
+    () => "A destructive command is forced without an in-file dry-run or confirmation guard."
+  );
+}
+function orphanLongRunningChildSignals(file) {
+  const longRunning = /port-forward|portforward|tunnel|watch|serve|daemon/i.test(file.current);
+  if (!longRunning) return [];
+  if (/\.Pid|pidFile|WriteFile\([^)]*pid|cmd\.Process|process group|Setpgid/i.test(file.current)) {
+    return [];
+  }
+  return lineSignals(
+    file,
+    "go-cli.orphan-long-running-child",
+    /exec\.(?:Command|CommandContext)\s*\(/,
+    () => "A long-running helper is started without an in-file PID or wait ownership pattern."
+  );
 }
 
 // src/parser.ts
@@ -21255,6 +21327,8 @@ Prioritize these high-value contract stories when evidence supports them (prefer
 4. JSON / machine-output contract skew \u2014 raw Encode vs versioned envelope; deprecated flags emitting different schemas than replacements (--json vs --format json).
 5. Success exit when the primary action failed, or exit-code conventions that break automation.
 6. User-facing timeouts/flags not wired into contexts used for network or child work.
+7. Broad process kills (pkill -f) and forced destructive infra commands without dry-run/confirm.
+8. Long-running children (port-forward/tunnel) started without PID ownership or stop path.
 
 Do NOT review generic Go style, broad security, observability, databases, or general engineering quality unless it directly breaks the CLI contract.
 Do NOT restate static lifecycle hits (os.Exit, exec.Command without context, context.Background in handlers) unless you add a user-impact angle the static title misses.
@@ -21322,7 +21396,9 @@ var GO_CLI_MODEL_SCHEMA = {
               "json-contract",
               "deprecation",
               "validation-order",
-              "dry-run"
+              "dry-run",
+              "process-ownership",
+              "destructive-ops"
             ]
           },
           severity: {
@@ -21759,7 +21835,7 @@ function positiveSummary(base, count) {
 function createApp() {
   const app = new Adversary({
     name: domain.name,
-    version: "0.0.2",
+    version: "0.0.14",
     // Domain already ranks and caps findings; keep SDK cap aligned.
     review: { maximumFindings: 3, minimumConfidence: "medium" }
   });
