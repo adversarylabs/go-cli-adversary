@@ -1,6 +1,6 @@
 {
   "name": "go-cli",
-  "version": "0.0.15",
+  "version": "0.0.16",
   "description": "Reviews Go command-line applications for predictable configuration, cancellation, diagnostics, and exit behavior.",
   "type": "module",
   "private": true,

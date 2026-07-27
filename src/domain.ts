@@ -492,7 +492,10 @@ function stdoutProgressSignals(file: SourceRevision): Signal[] {
   ];
 }
 
-/** Interactive stdin readers without an in-file terminal guard. */
+/**
+ * Interactive prompt *construction / Run*, not every ErrInterrupt comparison.
+ * promptui.ErrInterrupt in watch loops is not a prompt site.
+ */
 function interactiveNoTtySignals(file: SourceRevision): Signal[] {
   if (isNonProductPath(file.path)) return [];
   if (/\b(?:term\.IsTerminal|isatty\.IsTerminal|IsTerminal\s*\()/.test(file.current)) {
@@ -501,8 +504,8 @@ function interactiveNoTtySignals(file: SourceRevision): Signal[] {
   return lineSignals(
     file,
     "go-cli.interactive-no-tty",
-    /\b(?:bufio\.New(?:Scanner|Reader)\(\s*os\.Stdin|fmt\.Scan(?:ln|f)?\s*\(|promptui\.|survey\.|golang\.org\/x\/term\.ReadPassword)/,
-    () => "This path reads interactive input without an obvious non-TTY guard in the same file.",
+    /\b(?:bufio\.New(?:Scanner|Reader)\(\s*os\.Stdin|fmt\.Scan(?:ln|f)?\s*\(|promptui\.(?:Prompt|Select|PromptWithHelp)\s*\{|survey\.(?:Ask|AskOne)\s*\(|(?:golang\.org\/x\/)?term\.ReadPassword\s*\()/,
+    () => "This path constructs or runs an interactive prompt without an obvious non-TTY guard in the same file.",
   );
 }
 
@@ -787,16 +790,22 @@ function destructiveForceSignals(file: SourceRevision): Signal[] {
   );
 }
 
+/**
+ * PID / process-group ownership for long-lived children — separate from
+ * CommandContext cancellation (go-cli.subprocess-no-context).
+ */
 function orphanLongRunningChildSignals(file: SourceRevision): Signal[] {
   const longRunning = /port-forward|portforward|tunnel|watch|serve|daemon/i.test(file.current);
   if (!longRunning) return [];
   if (/\.Pid|pidFile|WriteFile\([^)]*pid|cmd\.Process|process group|Setpgid/i.test(file.current)) {
     return [];
   }
+  // Only when a long-running helper is started with CommandContext (cancellation
+  // already handled) or Command — but do not restate pure "no context" as ownership.
   return lineSignals(
     file,
     "go-cli.orphan-long-running-child",
-    /exec\.(?:Command|CommandContext)\s*\(/,
-    () => "A long-running helper is started without an in-file PID or wait ownership pattern.",
+    /exec\.CommandContext\s*\(/,
+    () => "A long-running helper is started without an in-file PID or process-group ownership pattern (separate from cancellation).",
   );
 }

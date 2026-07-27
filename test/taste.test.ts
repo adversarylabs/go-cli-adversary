@@ -28,7 +28,8 @@ test("process-boundary exit mapping is not an exit bypass", () => {
   assert.equal(isProcessBoundaryExit("os.Exit(ExitCode(err))", "main.go"), true);
   assert.equal(isProcessBoundaryExit("defer os.Exit(124)", "main.go"), false);
   assert.equal(isProcessBoundaryExit("log.Fatal(err)", "main.go"), false);
-  assert.equal(isProcessBoundaryExit("os.Exit(0)", "main.go"), false);
+  assert.equal(isProcessBoundaryExit("os.Exit(0)", "main.go"), true);
+  assert.equal(isProcessBoundaryExit("os.Exit(1)", "main.go"), true);
   assert.equal(
     isProcessBoundaryExit("os.Exit(cmd.ExitCode(err))", "internal/cli/run.go"),
     false,

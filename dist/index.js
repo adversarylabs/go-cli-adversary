@@ -16385,11 +16385,7 @@ function isProcessBoundaryExit(snippet, path) {
   if (!isMainPackagePath(path)) return false;
   if (/\bdefer\b/.test(snippet)) return false;
   if (/\bFatal/.test(snippet)) return false;
-  if (/\bos\.Exit\s*\(\s*(?:[\w.]+\.)?ExitCode\b/.test(snippet)) return true;
-  if (/\bos\.Exit\s*\(\s*(?:err|code|status|exitCode|exitStatus)\b/.test(snippet)) {
-    return true;
-  }
-  return false;
+  return /\bos\.Exit\s*\(/.test(snippet);
 }
 function isRootSignalBootstrap(snippet, surrounding) {
   const compact = `${surrounding}
@@ -16869,8 +16865,8 @@ function interactiveNoTtySignals(file) {
   return lineSignals(
     file,
     "go-cli.interactive-no-tty",
-    /\b(?:bufio\.New(?:Scanner|Reader)\(\s*os\.Stdin|fmt\.Scan(?:ln|f)?\s*\(|promptui\.|survey\.|golang\.org\/x\/term\.ReadPassword)/,
-    () => "This path reads interactive input without an obvious non-TTY guard in the same file."
+    /\b(?:bufio\.New(?:Scanner|Reader)\(\s*os\.Stdin|fmt\.Scan(?:ln|f)?\s*\(|promptui\.(?:Prompt|Select|PromptWithHelp)\s*\{|survey\.(?:Ask|AskOne)\s*\(|(?:golang\.org\/x\/)?term\.ReadPassword\s*\()/,
+    () => "This path constructs or runs an interactive prompt without an obvious non-TTY guard in the same file."
   );
 }
 function httpNoTimeoutSignals(file) {
@@ -17123,8 +17119,8 @@ function orphanLongRunningChildSignals(file) {
   return lineSignals(
     file,
     "go-cli.orphan-long-running-child",
-    /exec\.(?:Command|CommandContext)\s*\(/,
-    () => "A long-running helper is started without an in-file PID or wait ownership pattern."
+    /exec\.CommandContext\s*\(/,
+    () => "A long-running helper is started without an in-file PID or process-group ownership pattern (separate from cancellation)."
   );
 }
 
@@ -21590,6 +21586,9 @@ async function runModelCliReview(ctx, analysis, files, staticSeverities = [], st
     if (error instanceof ModelUnavailableError) {
       return "unavailable";
     }
+    if (error instanceof ModelReviewError || error instanceof Error && /model|broker|fireworks|openai|anthropic/i.test(error.message)) {
+      return "unavailable";
+    }
     throw error;
   }
 }
@@ -21835,7 +21834,7 @@ function positiveSummary(base, count) {
 function createApp() {
   const app = new Adversary({
     name: domain.name,
-    version: "0.0.14",
+    version: "0.0.16",
     // Domain already ranks and caps findings; keep SDK cap aligned.
     review: { maximumFindings: 3, minimumConfidence: "medium" }
   });

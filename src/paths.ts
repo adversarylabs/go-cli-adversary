@@ -34,20 +34,15 @@ export function isMainPackagePath(path: string): boolean {
 }
 
 /**
- * Process-boundary exit mapping in main — the correct CLI pattern, not a bypass.
- * Still flag defer os.Exit, Fatal*, and mid-handler exits outside main.
+ * Process-boundary exit in main — correct CLI pattern, not a bypass.
+ * Flag defer os.Exit and Fatal* even in main; flag any os.Exit outside main.
  */
 export function isProcessBoundaryExit(snippet: string, path: string): boolean {
   if (!isMainPackagePath(path)) return false;
   if (/\bdefer\b/.test(snippet)) return false;
   if (/\bFatal/.test(snippet)) return false;
-  // os.Exit(cmd.ExitCode(err)) / os.Exit(ExitCode(err))
-  if (/\bos\.Exit\s*\(\s*(?:[\w.]+\.)?ExitCode\b/.test(snippet)) return true;
-  // os.Exit(err) / os.Exit(code) named status variables at the boundary
-  if (/\bos\.Exit\s*\(\s*(?:err|code|status|exitCode|exitStatus)\b/.test(snippet)) {
-    return true;
-  }
-  return false;
+  // Any non-defer os.Exit in main is the process boundary (including os.Exit(1)).
+  return /\bos\.Exit\s*\(/.test(snippet);
 }
 
 /**
