@@ -1,4 +1,4 @@
-name: go-cli
+name: go/cli
 version: 0.0.16
 description: Reviews Go command-line applications for predictable configuration, cancellation, diagnostics, and exit behavior.
 
