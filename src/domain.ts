@@ -311,6 +311,36 @@ export const domain: DomainDefinition = {
       recommendation:
         "Record the child PID/process group when starting long-lived helpers and wait or signal that owner on stop.",
     },
+    {
+      id: "go-cli.flags-password-argv",
+      title: "A secret is accepted via a CLI flag on argv",
+      concern: "secrets accepted on process argv flags",
+      category: "security",
+      severity: "high",
+      confidence: "high",
+      summary: (count) =>
+        `${count} flag definition${count === 1 ? "" : "s"} accept password/token/secret material on argv.`,
+      whyItMatters:
+        "Process argument vectors are visible to other local users via ps, audit logs, shell history, and crash reporters.",
+      impact: "Credentials leak through process listings and shared-host observability without touching application logs.",
+      recommendation:
+        "Prefer env vars, files with restricted modes, or interactive prompts; if a secret flag remains, MarkHidden it and document env/file alternatives.",
+    },
+    {
+      id: "go-cli.update-insecure",
+      title: "Self-update or release download is insecure",
+      concern: "insecure self-update or release download",
+      category: "security",
+      severity: "high",
+      confidence: "high",
+      summary: (count) =>
+        `${count} update/download path${count === 1 ? "" : "s"} use plain HTTP or disable TLS verification.`,
+      whyItMatters:
+        "Self-update binaries and release assets must be integrity-protected; plain HTTP or skip-verify enables MITM code execution.",
+      impact: "An active network attacker can substitute a malicious binary during CLI update or install.",
+      recommendation:
+        "Download over HTTPS only, verify checksums/signatures, and never set InsecureSkipVerify on update transports.",
+    },
   ],
   noRiskSummary: "The reviewed command paths preserve errors, cancellation, and process-boundary ownership.",
   approvalSummary: "I would approve the reviewed CLI lifecycle and automation behavior.",
@@ -318,12 +348,7 @@ export const domain: DomainDefinition = {
     return {
       signals: [
         ...exitBypassSignals(file),
-        ...contentSignal(
-          file,
-          "go-cli.execute-error",
-          /^\s*(?:rootCmd|cmd|app)\.Execute(?:Context)?\(\)\s*$/m,
-          "The command execution error is not inspected or returned.",
-        ),
+        ...executeErrorSignals(file),
         ...cancellationSignals(file),
         ...subprocessSignals(file),
         ...shellInterpolationSignals(file),
@@ -343,6 +368,8 @@ export const domain: DomainDefinition = {
         ...broadProcessKillSignals(file),
         ...destructiveForceSignals(file),
         ...orphanLongRunningChildSignals(file),
+        ...flagsPasswordArgvSignals(file),
+        ...updateInsecureSignals(file),
       ],
       positives: [
         ...positive(
@@ -400,6 +427,81 @@ function exitBypassSignals(file: SourceRevision): Signal[] {
       return "This command path terminates the process directly.";
     },
   ).filter((signal) => !isProcessBoundaryExit(signal.snippet, signal.path));
+}
+
+/**
+ * Root command Execute error discarded — bare call or blank assignment.
+ * Catalog: exit.codes / errors.silent (go-cli.execute-error).
+ */
+function executeErrorSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  return lineSignals(
+    file,
+    "go-cli.execute-error",
+    /^\s*(?:_\s*=\s*)?(?:rootCmd|cmd|app)\.Execute(?:Context)?\(\)\s*$/,
+    (match) =>
+      match[0]?.includes("_")
+        ? "The command execution error is discarded with a blank identifier."
+        : "The command execution error is not inspected or returned.",
+  );
+}
+
+/** Credential-like flag names accepted on argv (catalog: flags.password-argv). */
+const CREDENTIAL_FLAG_NAME =
+  /["'](password|passwd|secret|token|api-key|apikey|access-token|api_key)["']/i;
+
+function flagsPasswordArgvSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  return lineSignals(
+    file,
+    "go-cli.flags-password-argv",
+    /(?:\bflag\.|(?:Flags|PersistentFlags)\(\)\.)(?:String|StringP|StringVar|StringVarP)\s*\([^;\n]*["'](?:password|passwd|secret|token|api-key|apikey|access-token|api_key)["']/i,
+    (match) => {
+      const name = match[0]?.match(CREDENTIAL_FLAG_NAME)?.[1] ?? "credential";
+      return `Flag "${name}" accepts secret material on argv (visible in process listings).`;
+    },
+  ).filter((signal) => {
+    const name = (file.current.split("\n")[signal.line - 1] ?? "").match(CREDENTIAL_FLAG_NAME)?.[1];
+    if (name === undefined) return false;
+    // Suppress when the same flag is marked hidden in this file (reduces operator-visible ps exposure slightly).
+    const hidden = new RegExp(
+      String.raw`MarkHidden\s*\(\s*["']${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`,
+      "i",
+    );
+    return !hidden.test(file.current);
+  });
+}
+
+/**
+ * Insecure self-update / release download (catalog: update.insecure).
+ * High precision: plain http:// URL literals with update|release|download|github.com/.../releases,
+ * or InsecureSkipVerify in a file that is clearly an update/download path.
+ */
+function updateInsecureSignals(file: SourceRevision): Signal[] {
+  if (isNonProductPath(file.path)) return [];
+  const signals = lineSignals(
+    file,
+    "go-cli.update-insecure",
+    /["'`]http:\/\/[^"'`\s]*(?:update|release|download|github\.com\/[^"'`\s]*\/releases)/i,
+    () => "Self-update or release download uses a plain HTTP URL (MITM risk).",
+  );
+  const updatePath =
+    /\b(?:self[-_]?update|autoUpdate|download(?:Binary|Update|Release)|CheckForUpdate|ApplyUpdate|go-selfupdate|go-update)\b/i.test(
+      file.current,
+    ) ||
+    /(?:func\s+\w*(?:Update|SelfUpdate|Download)\w*|["'`][^"'`]*(?:\/releases\/|self-update|download.*(?:bin|cli|binary))[^"'`]*["'`])/i.test(
+      file.current,
+    );
+  if (!updatePath) return signals;
+  return [
+    ...signals,
+    ...lineSignals(
+      file,
+      "go-cli.update-insecure",
+      /\bInsecureSkipVerify\s*:\s*true\b/,
+      () => "TLS verification is disabled on an update/download transport.",
+    ),
+  ];
 }
 
 function cancellationSignals(file: SourceRevision): Signal[] {
