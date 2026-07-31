@@ -38,3 +38,7 @@ Run `npm test`, `adversary validate .`, and `adversary pack --check .`.
 ## Project
 
 Source is available in the [Go CLI adversary repository](https://github.com/adversarylabs/go-cli-adversary). Go CLI is licensed under the [MIT License](LICENSE).
+
+## Issue catalog
+
+What this adversary targets (P0 / P1 / LLM-only priorities, detection notes, and public pattern references) is documented in [docs/issue-catalog.md](docs/issue-catalog.md).
