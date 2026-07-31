@@ -1,44 +1,44 @@
-# Go CLI adversary
+# go/cli
 
-Go CLI reviews command-line applications for predictable cancellation, diagnostics, cleanup, and automation behavior across Cobra, Viper, Kong, urfave/cli, `flag`, and hand-built commands.
+**go/cli** reviews Go command-line applications for predictable **process-boundary** behavior: exit ownership, cancellation, subprocess lifecycle, diagnostics streams, and automation-friendly contracts across Cobra, Viper, Kong, urfave/cli, `flag`, and hand-built commands.
 
-It reviews process-boundary ownership, cancellation, and subprocess safety:
+It is a **CLI domain reviewer**, not a general Go linter. It prefers silence over style nits. When it reports, it should be something a staff engineer would block for automation or production CLI reliability.
 
-- direct process termination (`os.Exit`, `log.Fatal*`, common logger Fatals)
-- discarded root command execution errors
-- work started from `context.Background` / `context.TODO`
-- `exec.Command` without `CommandContext`
-- shell `sh -c` / `bash -c` interpolation
+## What it does
 
-See [docs/cli-checklist.md](docs/cli-checklist.md) for roadmap coverage against a broader Go CLI checklist.
+1. **Discovers** non-test Go files used by CLI packages (`*.go`, excluding `*_test.go`).
+2. **Runs deterministic detectors** over structure and call sites that emit stable rule ids with file:line evidence.
+3. **Synthesizes a review** (severity, impact, recommendation) from those signals.
+4. Optionally **enhances** with a model when the CLI provides one (`permissions.model: true`) — explanation and ranking only.
 
-## Model-assisted CLI review
+It never executes the scanned project as the product under review, never installs dependencies into it, and never needs network access to the target repository.
 
-When the Adversary CLI provides a model broker (`permissions.model: true`), go-cli keeps
-deterministic discovery and lifecycle findings, then asks the model for a small number of
-high-confidence CLI-contract observations (flags, exit/stream contracts, cancellation stories,
-automation compatibility, incomplete command paths). Provider credentials and model selection
-stay in the CLI; this package only calls `ctx.model.review(...)`.
+## What it detects
 
-Runtime model calls require a CLI build that includes the model-broker feature. Unit tests inject
-a deterministic `ReviewModel` and never call a live provider.
+Every **shipped rule id**, severity, and short description lives in **[CHECKS.md](CHECKS.md)** — the audit surface for “what does this adversary look for?”
 
-## Fixtures and calibration
+Highlights:
 
-Five graded fixtures own expected review snapshots. The 61-repository benchmark index calibrates command lifecycle and configuration judgment without copying source.
+| Area | Examples |
+| --- | --- |
+| Process ownership | `os.Exit` / `log.Fatal` below main; discarded root `Execute` errors |
+| Cancellation | `context.Background`/`TODO` in command work; `exec.Command` without `CommandContext` |
+| Injection | `sh -c` / `bash -c` interpolation of composed strings |
+| Diagnostics | Progress on stdout; `Output()` discarding stderr; bare `log` for user messaging |
+| Contracts | Exit code 2 as catch-all; missing version identity; password flags on argv |
 
-## Automatic detection
+### Ownership boundaries
 
-`adversary auto` selects Go CLI when Go command entrypoints or files under `cmd/` change.
+Other official adversaries own adjacent classes so findings stay non-duplicative:
 
-## Development
+| Concern | Owned by |
+| --- | --- |
+| HTTP server/client timeouts for libraries and services | [`go/http`](https://github.com/adversarylabs/go-http-adversary) |
+| Concurrent lifecycle / WaitGroup / channel ownership | [`go/concurrency`](https://github.com/adversarylabs/go-concurrency-adversary) |
+| High-precision committed secrets | [`security/secrets`](https://github.com/adversarylabs/secrets-adversary) |
 
-Run `npm test`, `adversary validate .`, and `adversary pack --check .`.
+## Precision stance
 
-## Project
-
-Source is available in the [Go CLI adversary repository](https://github.com/adversarylabs/go-cli-adversary). Go CLI is licensed under the [MIT License](LICENSE).
-
-## Issue catalog
-
-What this adversary targets (P0 / P1 / LLM-only priorities, detection notes, and public pattern references) is documented in [docs/issue-catalog.md](docs/issue-catalog.md).
+- **High confidence** only for deterministic, evidence-backed patterns.
+- Clean fixtures must stay quiet; vulnerable fixtures must fire where graded fixtures exist.
+- Prefer missing a weak signal over a false positive on normal production code.
