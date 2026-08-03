@@ -17,7 +17,7 @@ export function createApp(): Adversary {
   });
 
   app.rule(`${domain.name}.review`, async (ctx) => {
-    const discovery = await discoverSources(ctx.repoPath, ctx.change);
+    const discovery = await discoverSources(ctx);
     const analysis = await analyzeDiscovery(discovery);
     ctx.summary.files_scanned = analysis.filesScanned;
     // Analysis prep is context for the runner (files scanned, mode), not a user-facing
