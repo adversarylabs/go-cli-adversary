@@ -1,6 +1,7 @@
 import { formatOpinion, requireOpinionConcern, type RuleContext } from "@adversarylabs/sdk";
 import { domain } from "./domain.js";
 import { runModelCliReview, type DiscoveryFile } from "./model-review.js";
+import { attachImportNavigation } from "./navigation.js";
 import { isCommandPath, isNonProductPath, pathPriority } from "./paths.js";
 import { type Analysis, type RuleDefinition, type Signal } from "./types.js";
 
@@ -76,6 +77,8 @@ export async function reviewDomain(
 
   const staticSeverities = active.map((item) => item.rule.severity);
   const staticPrimaryConcern = active[0]?.rule.concern;
+  await attachImportNavigation(ctx, analysis);
+
   const modelStatus = await runModelCliReview(
     ctx,
     analysis,
