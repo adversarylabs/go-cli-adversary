@@ -1,5 +1,5 @@
 name: go/cli
-version: 0.0.21
+version: 0.0.22
 description: Reviews Go command-line applications for predictable configuration, cancellation, diagnostics, and exit behavior.
 
 triggers:
