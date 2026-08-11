@@ -56,7 +56,7 @@ Derived from the “top 20 things a Go CLI should do” checklist, dogfood on `a
 | 16 | JSON schema not versioned (`schemaVersion` missing) | Breaking changes invisible | medium | good | **done** | Model json-contract priority |
 | 17 | Deprecated flag emits different schema than replacement | Silent migration landmine | hard | **best** | **done** | Model deprecation category |
 | 18 | Flag rename without alias / deprecation window | Hard breaks for users | medium | good | later | Flag definitions over time (diff-aware) |
-| 19 | Required / mutually exclusive flags not validated | Runtime fail after work starts | medium | good | later | Needs structure-aware Cobra marks |
+| 19 | Required / mutually exclusive flags not validated | Runtime fail after work starts | medium | good | **partial** | Model catches mutually exclusive values when one is silently ignored; required-flag structure remains later |
 | 20 | Config precedence unclear or re-parsed ad hoc | “Why did env win?” | hard | **best** | later | Viper/bind patterns |
 | 21 | Env vars without documented prefix | Collisions, surprise config | medium | good | later | `os.Getenv` / `AutomaticEnv` |
 | 22 | Effective config not printable in debug/verbose | Un-debuggable prod issues | hard | good | later | Soft; observation |

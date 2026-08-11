@@ -32,12 +32,19 @@ Focus only on Go CLI engineering that affects users of the CLI:
 Prioritize these high-value contract stories when evidence supports them (prefer novel insights over restating deterministic signals already listed):
 1. Validation after side effects — network/write/process launch before flag/arg validation fails.
 2. Silent success / no-op paths — empty branches, stub handlers, or missing cases that still return nil / exit 0.
-3. Dry-run / apply / force flag interactions that silently ignore user intent.
-4. JSON / machine-output contract skew — raw Encode vs versioned envelope; deprecated flags emitting different schemas than replacements (--json vs --format json).
-5. Success exit when the primary action failed, or exit-code conventions that break automation.
-6. User-facing timeouts/flags not wired into contexts used for network or child work.
-7. Broad process kills (pkill -f) and forced destructive infra commands without dry-run/confirm.
-8. Long-running children (port-forward/tunnel) started without PID ownership or stop path.
+3. Incompatible flag or mode interactions — the command accepts both explicitly supplied options, but one mode branch bypasses or ignores the other option's value without an early error or normalization.
+4. Dry-run / apply / force flag interactions that silently ignore user intent.
+5. JSON / machine-output contract skew — raw Encode vs versioned envelope; deprecated flags emitting different schemas than replacements (--json vs --format json).
+6. Success exit when the primary action failed, or exit-code conventions that break automation.
+7. User-facing timeouts/flags not wired into contexts used for network or child work.
+8. Broad process kills (pkill -f) and forced destructive infra commands without dry-run/confirm.
+9. Long-running children (port-forward/tunnel) started without PID ownership or stop path.
+
+For incompatible flags or modes, report only when the prepared source proves all of these:
+- both options are accepted by the same command and can be explicitly supplied together;
+- a mode branch, early return, or alternate renderer leaves the other supplied value unused;
+- no parse-time or early handler guard rejects or canonicalizes the combination.
+Do not infer a conflict from two flag declarations alone. Stay quiet when both values are applied, when aliases share one underlying value, or when options are independent and legitimately compose. Recommend either honoring both explicit values or rejecting the combination before side effects.
 
 Do NOT review generic Go style, broad security, observability, databases, or general engineering quality unless it directly breaks the CLI contract.
 Do NOT restate static lifecycle hits (os.Exit, exec.Command without context, context.Background in handlers) unless you add a user-impact angle the static title misses.

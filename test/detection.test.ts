@@ -10,5 +10,7 @@ test("declares automatic detection through the canonical manifest", async () => 
 
   assert.ok(files !== undefined && files.length > 0);
   assert.deepEqual(files, manifest.triggers?.files_changed);
+  assert.ok(files.includes("**/cmd/**/*.go"), "nested command packages must activate go-cli");
+  assert.ok(files.includes("**/cli/**/*.go"), "nested CLI packages must activate go-cli");
   assert.equal(manifest.detection?.entrypoint, undefined);
 });

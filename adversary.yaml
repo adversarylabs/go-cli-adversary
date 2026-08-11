@@ -6,11 +6,17 @@ triggers:
   manual: true
   files_changed:
     - "cmd/**/*.go"
+    - "**/cmd/**/*.go"
+    - "cli/**/*.go"
+    - "**/cli/**/*.go"
     - "**/main.go"
 
 detection:
   files:
     - "cmd/**/*.go"
+    - "**/cmd/**/*.go"
+    - "cli/**/*.go"
+    - "**/cli/**/*.go"
     - "**/main.go"
 
 runtime:

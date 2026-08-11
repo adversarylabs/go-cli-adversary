@@ -233,6 +233,126 @@ func parse() {
   assert.equal(modelNotes[0]!.evidence?.[0]?.location?.file, "cmd/root.go");
 });
 
+test("incompatible flag modes: model reports an explicitly supplied value bypassed by another mode", async () => {
+  const root = await writeCliFixture("incompatible-flag-modes", {
+    "pkg/cmd/items/list.go": `package items
+
+import "github.com/spf13/cobra"
+
+type listOptions struct {
+	format string
+	fields []string
+}
+
+func newListCommand() *cobra.Command {
+	opts := listOptions{}
+	cmd := &cobra.Command{
+		Use: "list",
+		RunE: func(cmd *cobra.Command, args []string) error { return runList(opts) },
+	}
+	cmd.Flags().StringVar(&opts.format, "output", "table", "output mode")
+	cmd.Flags().StringSliceVar(&opts.fields, "select", nil, "fields to include")
+	return cmd
+}
+
+func runList(opts listOptions) error {
+	if opts.format == "json" {
+		return encodeAllItems()
+	}
+	return renderTable(opts.fields)
+}
+`,
+  });
+  const model = capturingModel({
+    assessment: {
+      risk: "medium",
+      summary: "Structured output silently ignores an explicitly supplied field selection.",
+    },
+    ship: false,
+    primaryConcern: "silently ignored field selection",
+    observations: [
+      {
+        id: "ignored-selection",
+        title: "Structured output bypasses field selection",
+        category: "flags-args",
+        severity: "medium",
+        confidence: "high",
+        summary: "The command accepts output and select together, but the JSON branch never consumes select.",
+        whyItMatters: "The command exits successfully after discarding explicit user intent.",
+        recommendation: "Apply the selection before formatting or reject the combination before doing work.",
+        evidenceIds: ["file:pkg/cmd/items/list.go"],
+      },
+    ],
+  });
+
+  const result = await runWithModel(root, model, {
+    base_ref: "main",
+    head_ref: "HEAD",
+    scan_mode: "changed",
+    changed_files: ["pkg/cmd/items/list.go"],
+  });
+
+  const request = model.requests.find((item) => !isConcernRewriteRequest(item));
+  assert.ok(request, "expected the bounded CLI model review request");
+  assertBoundedGoCliRequest(request);
+  const input = request.input as {
+    sources: Array<{ path: string; content: string }>;
+  };
+  const source = input.sources.find((item) => item.path === "pkg/cmd/items/list.go");
+  assert.match(source?.content ?? "", /StringSliceVar/);
+  assert.match(source?.content ?? "", /if opts\.format == "json"/);
+
+  const note = result.observations.find(
+    (item) => item.key === "go-cli.model.ignored-selection",
+  );
+  assert.ok(note);
+  assert.equal(note.evidence?.[0]?.location?.file, "pkg/cmd/items/list.go");
+  assert.equal(note.metadata?.category, "flags-args");
+  assert.match(String(note.metadata?.recommendation ?? ""), /reject the combination/i);
+  assert.equal(result.opinion?.ship, false);
+});
+
+test("composable flag modes: model stays quiet when selection is applied before formatting", async () => {
+  const root = await writeCliFixture("composable-flag-modes", {
+    "internal/cli/items/list.go": `package items
+
+type listOptions struct {
+	format string
+	fields []string
+}
+
+func runList(opts listOptions) error {
+	selected := selectFields(loadItems(), opts.fields)
+	if opts.format == "json" {
+		return encodeItems(selected)
+	}
+	return renderTable(selected)
+}
+`,
+  });
+  const model = capturingModel({
+    assessment: {
+      risk: "none",
+      summary: "Field selection is applied before either output renderer.",
+    },
+    ship: true,
+    observations: [],
+  });
+
+  const result = await runWithModel(root, model, {
+    base_ref: "main",
+    head_ref: "HEAD",
+    scan_mode: "changed",
+    changed_files: ["internal/cli/items/list.go"],
+  });
+
+  assert.equal(result.opinion?.ship, true);
+  assert.equal(
+    result.observations.filter((item) => item.key.startsWith("go-cli.model.")).length,
+    0,
+  );
+});
+
 test("incomplete command implementation: model reports unfinished paths", async () => {
   const root = await writeCliFixture("incomplete-command", {
     "cmd/cluster.go": `package main
@@ -568,6 +688,9 @@ func run() error { return nil }
 
 test("wave B: model prompt prioritizes contract stories and schema allows new categories", () => {
   assert.match(GO_CLI_MODEL_PROMPT, /Silent success/);
+  assert.match(GO_CLI_MODEL_PROMPT, /both options are accepted by the same command/);
+  assert.match(GO_CLI_MODEL_PROMPT, /Do not infer a conflict from two flag declarations alone/);
+  assert.match(GO_CLI_MODEL_PROMPT, /options are independent and legitimately compose/);
   assert.match(GO_CLI_MODEL_PROMPT, /Dry-run/);
   assert.match(GO_CLI_MODEL_PROMPT, /JSON \/ machine-output contract skew/);
   assert.match(GO_CLI_MODEL_PROMPT, /Do NOT restate static lifecycle hits/);
