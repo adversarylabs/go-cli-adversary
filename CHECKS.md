@@ -3,9 +3,26 @@
 This file is the **public audit list** of detectors. If a rule id appears here, it is part of the product surface: it should fire on a vulnerable pattern, stay quiet on the documented clean case, and produce file:line evidence where applicable.
 
 Runtime source of truth: [`src/domain.ts`](src/domain.ts).
+Model source of truth: [`src/model-review.ts`](src/model-review.ts).
 Regression entry: fixture and corpus tests under `test/`.
 
 **Scope:** non-test `*.go` files in CLI-oriented packages.
+
+---
+
+## Model-reviewed contracts
+
+### Incompatible flag or mode interactions
+
+| | |
+| --- | --- |
+| **What** | A command accepts two explicit options even though one mode silently makes the other option inert |
+| **Why** | The command succeeds after discarding user intent, producing output or effects different from the request |
+| **Looks for** | Same-command option declarations plus a mode branch or early return that bypasses the other supplied value, with no early guard or normalization |
+| **Stays quiet when** | Both values are applied; options are independent; aliases share one value; or the combination is rejected clearly before work |
+| **Remediation** | Honor both explicit values or reject the incompatible combination before side effects |
+
+This is a model-reviewed `flags-args` contract rather than a syntax-only rule. Findings must cite the declarations and the branch that drops the value; declarations alone are insufficient evidence.
 
 ---
 
