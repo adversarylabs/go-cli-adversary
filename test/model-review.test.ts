@@ -457,6 +457,97 @@ func run() error { return nil }
   assert.equal(model.requests[0]!.input && (model.requests[0]!.input as { domain: string }).domain, "go-cli");
 });
 
+test("model observations with only unknown evidence IDs are dropped", async () => {
+  const root = await writeCliFixture("unknown-evidence", {
+    "cmd/ok.go": `package main
+
+func run() error { return nil }
+`,
+  });
+  const model = capturingModel({
+    assessment: { risk: "none", summary: "The prepared change is safe." },
+    ship: true,
+    primaryConcern: "fabricated incompatible flags",
+    observations: [
+      {
+        id: "fabricated-citation",
+        title: "Fabricated incompatible flags",
+        category: "flags-args",
+        severity: "high",
+        confidence: "high",
+        summary: "This observation cites no prepared source.",
+        whyItMatters: "Unsupported observations must not reach users.",
+        recommendation: "Drop observations without validated evidence.",
+        evidenceIds: ["file:cmd/not-in-input.go"],
+      },
+    ],
+  });
+
+  const result = await runWithModel(root, model, {
+    base_ref: "main",
+    head_ref: "HEAD",
+    scan_mode: "changed",
+    changed_files: ["cmd/ok.go"],
+  });
+
+  assert.equal(
+    result.observations.some(
+      (note) => note.key === "go-cli.model.fabricated-citation",
+    ),
+    false,
+  );
+  assert.equal(result.assessment?.risk, "none");
+  assert.equal(result.opinion?.ship, true);
+  assert.doesNotMatch(result.opinion?.summary ?? "", /fabricated incompatible flags/i);
+});
+
+test("model observations keep only validated evidence IDs", async () => {
+  const root = await writeCliFixture("mixed-evidence", {
+    "cmd/root.go": `package main
+
+func run() error { return nil }
+`,
+  });
+  const model = capturingModel({
+    assessment: { risk: "medium", summary: "A CLI contract needs attention." },
+    ship: false,
+    observations: [
+      {
+        id: "mixed-citations",
+        title: "Incompatible output flags",
+        category: "flags-args",
+        severity: "medium",
+        confidence: "high",
+        summary: "The observation includes one prepared source citation.",
+        whyItMatters: "Only validated evidence should be shown to users.",
+        recommendation: "Retain the prepared source and discard unknown citations.",
+        evidenceIds: [
+          "file:cmd/not-in-input.go",
+          "file:cmd/root.go",
+          "file:cmd/also-missing.go",
+        ],
+      },
+    ],
+  });
+
+  const result = await runWithModel(root, model, {
+    base_ref: "main",
+    head_ref: "HEAD",
+    scan_mode: "changed",
+    changed_files: ["cmd/root.go"],
+  });
+
+  const note = result.observations.find(
+    (item) => item.key === "go-cli.model.mixed-citations",
+  );
+  assert.ok(note);
+  assert.deepEqual(
+    note.evidence?.map((item) => item.location?.file),
+    ["cmd/root.go"],
+  );
+  assert.deepEqual(note.metadata?.evidenceIds, ["file:cmd/root.go"]);
+});
+
 test("prepared model input stays bounded and includes change plus deterministic evidence", () => {
   const prepared = prepareModelInputFromDiscovery(
     {

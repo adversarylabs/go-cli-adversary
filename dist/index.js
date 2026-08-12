@@ -22170,7 +22170,13 @@ function buildModelReviewRequestFromDiscovery(change, analysis, files) {
   };
 }
 async function applyModelCliReview(ctx, output, evidenceById, staticSeverities = [], staticPrimaryConcern) {
-  const modelObservationSeverities = output.observations.map((item) => item.severity);
+  const observations = output.observations.slice(0, MAX_MODEL_OBSERVATIONS).map((observation) => ({
+    ...observation,
+    evidenceIds: [
+      ...new Set(observation.evidenceIds.filter((id) => evidenceById.has(id)))
+    ].slice(0, 8)
+  })).filter((observation) => observation.evidenceIds.length > 0);
+  const modelObservationSeverities = observations.map((item) => item.severity);
   const risk = maxSeverity([
     output.assessment.risk,
     ...staticSeverities,
@@ -22180,7 +22186,7 @@ async function applyModelCliReview(ctx, output, evidenceById, staticSeverities =
     risk,
     summary: output.assessment.summary
   });
-  const rankedObservations = output.observations.slice().sort(
+  const rankedObservations = observations.slice().sort(
     (left, right) => severityRank(right.severity) - severityRank(left.severity) || left.id.localeCompare(right.id)
   );
   const blocking = staticSeverities.some((severity) => severityRank(severity) >= severityRank("medium")) || modelObservationSeverities.some((severity) => severityRank(severity) >= severityRank("medium"));
@@ -22188,11 +22194,7 @@ async function applyModelCliReview(ctx, output, evidenceById, staticSeverities =
   const topModel = rankedObservations[0];
   const staticMax = maxSeverity(staticSeverities);
   const modelMax = maxSeverity(modelObservationSeverities);
-  const modelCandidates = [
-    topModel?.title,
-    output.primaryConcern,
-    topModel === void 0 ? void 0 : categoryConcern(topModel.category)
-  ];
+  const modelCandidates = topModel === void 0 ? [] : [topModel.title, output.primaryConcern, categoryConcern(topModel.category)];
   const staticCandidates = [staticPrimaryConcern];
   const ordered = severityRank(staticMax) > severityRank(modelMax) ? [...staticCandidates, ...modelCandidates] : [...modelCandidates, ...staticCandidates];
   const concern = await resolveOpinionConcern(ctx, ordered);
@@ -22203,7 +22205,7 @@ async function applyModelCliReview(ctx, output, evidenceById, staticSeverities =
       change: ctx.change
     })
   );
-  for (const observation of output.observations.slice(0, MAX_MODEL_OBSERVATIONS)) {
+  for (const observation of observations) {
     const evidence = observation.evidenceIds.map((id) => evidenceById.get(id)).filter((item) => item !== void 0).slice(0, 8).map((item) => ({
       location: {
         file: item.path,

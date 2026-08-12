@@ -324,7 +324,16 @@ export async function applyModelCliReview(
   staticSeverities: StaticSeverity[] = [],
   staticPrimaryConcern?: string,
 ): Promise<void> {
-  const modelObservationSeverities = output.observations.map((item) => item.severity);
+  const observations = output.observations
+    .slice(0, MAX_MODEL_OBSERVATIONS)
+    .map((observation) => ({
+      ...observation,
+      evidenceIds: [
+        ...new Set(observation.evidenceIds.filter((id) => evidenceById.has(id))),
+      ].slice(0, 8),
+    }))
+    .filter((observation) => observation.evidenceIds.length > 0);
+  const modelObservationSeverities = observations.map((item) => item.severity);
   const risk = maxSeverity([
     output.assessment.risk,
     ...staticSeverities,
@@ -336,7 +345,7 @@ export async function applyModelCliReview(
     summary: output.assessment.summary,
   });
 
-  const rankedObservations = output.observations.slice().sort(
+  const rankedObservations = observations.slice().sort(
     (left, right) =>
       severityRank(right.severity) - severityRank(left.severity) || left.id.localeCompare(right.id),
   );
@@ -351,11 +360,10 @@ export async function applyModelCliReview(
   const topModel = rankedObservations[0];
   const staticMax = maxSeverity(staticSeverities);
   const modelMax = maxSeverity(modelObservationSeverities);
-  const modelCandidates = [
-    topModel?.title,
-    output.primaryConcern,
-    topModel === undefined ? undefined : categoryConcern(topModel.category),
-  ];
+  const modelCandidates =
+    topModel === undefined
+      ? []
+      : [topModel.title, output.primaryConcern, categoryConcern(topModel.category)];
   const staticCandidates = [staticPrimaryConcern];
   const ordered =
     severityRank(staticMax) > severityRank(modelMax)
@@ -371,7 +379,7 @@ export async function applyModelCliReview(
     }),
   );
 
-  for (const observation of output.observations.slice(0, MAX_MODEL_OBSERVATIONS)) {
+  for (const observation of observations) {
     const evidence = observation.evidenceIds
       .map((id) => evidenceById.get(id))
       .filter((item): item is PreparedEvidenceItem => item !== undefined)
