@@ -4,6 +4,8 @@ export interface SourceRevision {
   path: string;
   current: string;
   changedLines: Set<number>;
+  /** Added/current lines whose non-comment Go text changed, when a git patch is available. */
+  semanticChangedLines?: Set<number>;
   status: "added" | "modified" | "repository";
 }
 

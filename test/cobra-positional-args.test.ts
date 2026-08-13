@@ -130,6 +130,35 @@ test("accepts dominating guards and exact switch cases", async () => {
   assert.deepEqual(await signals(switched), []);
 });
 
+test("accepts a dominating guard in every enclosing block", async () => {
+  const source = command(`		Args: cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if enabled {
+				if len(args) == 0 { return errors.New("missing id") }
+				return search(args[0])
+			}
+			return nil
+		},`).replace(
+    'import "github.com/spf13/cobra"',
+    'import (\n\t"errors"\n\t"github.com/spf13/cobra"\n)',
+  );
+  assert.deepEqual(await signals(source), []);
+});
+
+test("does not mistake a conditional panic for an unconditional exit", async () => {
+  const conditional = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) == 0 { if debug { panic("debug") } }
+			return search(args[0])
+		},`);
+  assert.equal((await signals(conditional)).length, 1);
+
+  const direct = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) == 0 { panic("missing id") }
+			return search(args[0])
+		},`);
+  assert.deepEqual(await signals(direct), []);
+});
+
 test("does not confuse os.Args or arbitrary slices with Cobra positional args", async () => {
   const source = command(`		RunE: func(_ *cobra.Command, args []string) error {
 			_ = os.Args[1]
@@ -159,6 +188,120 @@ test("ignores nested closures and block-local slices that shadow the positional 
 			return nil
 		},`);
   assert.deepEqual(await signals(source), []);
+});
+
+test("ignores range, initializer, and var declarations that shadow callback args", async () => {
+  const source = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			for _, args := range [][]string{{"safe"}} { println(args[0]) }
+			if args := []string{"safe"}; enabled { println(args[0]) }
+			{
+				var args = []string{"safe"}
+				println(args[0])
+			}
+			return nil
+		},`);
+  assert.deepEqual(await signals(source), []);
+});
+
+test("resets validator and guard proofs when positional args may be reassigned", async () => {
+  const unsafe = command(`		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			args = maybeEmpty(args)
+			return search(args[0])
+		},`);
+  assert.equal((await signals(unsafe)).length, 1);
+
+  const guarded = command(`		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				args = maybeEmpty(args)
+				if len(args) == 0 { return errors.New("empty") }
+				return search(args[0])
+			}
+			return nil
+		},`).replace(
+    'import "github.com/spf13/cobra"',
+    'import (\n\t"errors"\n\t"github.com/spf13/cobra"\n)',
+  );
+  assert.deepEqual(await signals(guarded), []);
+
+  const knownNonEmpty = command(`		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			args = []string{"replacement"}
+			return search(args[0])
+		},`);
+  assert.deepEqual(await signals(knownNonEmpty), []);
+
+  const unreachable = command(`		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if debug { args = maybeEmpty(args); return nil }
+			return search(args[0])
+		},`);
+  assert.deepEqual(await signals(unreachable), []);
+
+  const conditional = command(`		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if debug { args = maybeEmpty(args) }
+			return search(args[0])
+		},`);
+  assert.equal((await signals(conditional)).length, 1);
+
+  const conditionallyGuarded = command(`		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if debug {
+				args = maybeEmpty(args)
+				if len(args) == 0 { return errors.New("empty") }
+			}
+			return search(args[0])
+		},`).replace(
+    'import "github.com/spf13/cobra"',
+    'import (\n\t"errors"\n\t"github.com/spf13/cobra"\n)',
+  );
+  assert.deepEqual(await signals(conditionallyGuarded), []);
+});
+
+test("resolves exact same-file named Cobra callbacks without following arbitrary helpers", async () => {
+  const unsafe = `package cmd
+
+import "github.com/spf13/cobra"
+
+func runSearch(_ *cobra.Command, values []string) error { return search(values[0]) }
+
+func newSearchCommand() *cobra.Command {
+	return &cobra.Command{Args: cobra.MaximumNArgs(1), RunE: runSearch}
+}
+`;
+  assert.equal((await signals(unsafe)).length, 1);
+
+  const safe = unsafe.replace("cobra.MaximumNArgs(1)", "cobra.MinimumNArgs(1)");
+  assert.deepEqual(await signals(safe), []);
+
+  const namedResult = unsafe.replace(
+    "func runSearch(_ *cobra.Command, values []string) error",
+    "func runSearch(_ *cobra.Command, values []string) (err error)",
+  );
+  assert.equal((await signals(namedResult)).length, 1);
+
+  const shadowed = unsafe.replace(
+    "\treturn &cobra.Command",
+    "\trunSearch := externalHandler\n\treturn &cobra.Command",
+  );
+  assert.deepEqual(await signals(shadowed), []);
+
+  const wrongSignature = unsafe.replace(
+    "func runSearch(_ *cobra.Command, values []string) error",
+    "func runSearch(values []string) error",
+  );
+  assert.deepEqual(await signals(wrongSignature), []);
+
+  const namedRun = unsafe
+    .replace("func runSearch(_ *cobra.Command, values []string) error { return search(values[0]) }", "func runSearch(_ *cobra.Command, values []string) { search(values[0]) }")
+    .replace("RunE: runSearch", "Run: runSearch");
+  assert.equal((await signals(namedRun)).length, 1);
+
+  const parameterShadow = unsafe
+    .replace("func newSearchCommand()", "func newSearchCommand(runSearch func(*cobra.Command, []string) error)");
+  assert.deepEqual(await signals(parameterShadow), []);
 });
 
 test("recognizes a renamed Cobra import and stays quiet for unknown custom validators", async () => {

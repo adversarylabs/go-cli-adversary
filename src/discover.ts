@@ -40,6 +40,7 @@ export async function discoverSources(ctx: RuleContext): Promise<Discovery> {
       path: source.path,
       current: source.content,
       changedLines: change.changedLines,
+      ...(change.semanticChangedLines === undefined ? {} : { semanticChangedLines: change.semanticChangedLines }),
       status: change.status,
     });
   }
@@ -54,10 +55,10 @@ export async function discoverSources(ctx: RuleContext): Promise<Discovery> {
 async function changedSource(
   ctx: RuleContext,
   path: string,
-): Promise<Pick<SourceRevision, "changedLines" | "status">> {
+): Promise<Pick<SourceRevision, "changedLines" | "semanticChangedLines" | "status">> {
   const base = ctx.change?.baseRef;
   if (base === undefined || !(await existsAtRevision(ctx.repoPath, base, path))) {
-    return { changedLines: new Set<number>(), status: "added" };
+    return { changedLines: new Set<number>(), semanticChangedLines: new Set<number>(), status: "added" };
   }
 
   const args = ["diff", "--unified=0", base];
@@ -65,7 +66,11 @@ async function changedSource(
   if (head !== undefined && !ctx.change?.worktree) args.push(head);
   args.push("--", path);
   const patch = await gitOutput(ctx.repoPath, args);
-  return { changedLines: changedLineNumbers(patch), status: "modified" };
+  return {
+    changedLines: changedLineNumbers(patch),
+    semanticChangedLines: semanticChangedLineNumbers(patch),
+    status: "modified",
+  };
 }
 
 async function existsAtRevision(repoPath: string, revision: string, path: string): Promise<boolean> {
@@ -95,4 +100,43 @@ function changedLineNumbers(patch: string): Set<number> {
     for (let line = start; line < start + count; line += 1) lines.add(line);
   }
   return lines;
+}
+
+function semanticChangedLineNumbers(patch: string): Set<number> {
+  const semantic = new Set<number>();
+  const lines = patch.split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const header = lines[index]?.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+    if (header === null || header === undefined) {
+      index += 1;
+      continue;
+    }
+    let currentLine = Number(header[1]);
+    const removed: string[] = [];
+    const added: Array<{ line: number; text: string }> = [];
+    index += 1;
+    while (index < lines.length && !lines[index]!.startsWith("@@ ")) {
+      const line = lines[index]!;
+      if (line.startsWith("-") && !line.startsWith("---")) removed.push(line.slice(1));
+      if (line.startsWith("+") && !line.startsWith("+++")) {
+        added.push({ line: currentLine, text: line.slice(1) });
+        currentLine += 1;
+      } else if (line.startsWith(" ")) {
+        currentLine += 1;
+      }
+      index += 1;
+    }
+    for (let addedIndex = 0; addedIndex < added.length; addedIndex += 1) {
+      const addition = added[addedIndex]!;
+      const addedCode = stripGoComments(addition.text).trim();
+      const removedCode = stripGoComments(removed[addedIndex] ?? "").trim();
+      if (addedCode !== "" && addedCode !== removedCode) semantic.add(addition.line);
+    }
+  }
+  return semantic;
+}
+
+function stripGoComments(line: string): string {
+  return line.replace(/\/\/.*$/, "").replace(/\/\*.*?\*\//g, "");
 }
