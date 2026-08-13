@@ -34,8 +34,8 @@ This is a model-reviewed `flags-args` contract rather than a syntax-only rule. F
 | --- | --- |
 | **What** | A Cobra `Run`/`RunE` callback indexes or slices positional `args` beyond the minimum its validator or control flow proves present |
 | **Why** | Missing operands reach the callback with a shorter slice and panic instead of producing a usage error |
-| **Looks for** | Constant `args[n]` and bounded slice expressions inside inline or exact same-file named Cobra command callbacks, cross-checked against `ExactArgs`, `MinimumNArgs`, `RangeArgs`, mechanically proven custom validators, reassignment, and dominating `len(args)` guards |
-| **Stays quiet when** | Validation or post-assignment control flow proves the required minimum; a guard or exact switch case dominates the access; the validator cannot be mechanically understood; the name resolves to a shadowed/arbitrary slice; the callback binding or signature cannot be proven locally; or the code is not a Cobra command callback |
+| **Looks for** | Constant `args[n]` and bounded slice expressions inside inline, immediately invoked, deferred/goroutine, or exact same-file named Cobra callbacks, cross-checked against `ExactArgs`, `MinimumNArgs`, `RangeArgs`, mechanically proven custom validators, path-sensitive reassignment, and dominating `len(args)` guards |
+| **Stays quiet when** | Validation or post-assignment control flow proves the required minimum; branch, loop, or exhaustive length-switch flow makes every insufficient path exit/continue before the access; the validator cannot be mechanically understood; the name resolves to a shadowed/arbitrary slice; a closure is merely stored rather than invoked; the callback binding or signature cannot be proven locally; or the code is not a Cobra command callback |
 | **Remediation** | Require enough operands with Cobra validation, or return a usage error from a `len(args)` guard before indexing |
 
 ### `go-cli.exit-bypass`

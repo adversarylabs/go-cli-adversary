@@ -114,6 +114,26 @@ test("changed guard and reassignment lines can anchor a legacy unsafe access", a
   }
 });
 
+test("a changed named-handler binding anchors its same-file unsafe callback", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "go-cli-cobra-named-binding-locality-"));
+  const path = "cmd/search.go";
+  await execute("git", ["init", "--quiet"], { cwd: repo });
+  await execute("git", ["config", "user.email", "tests@example.com"], { cwd: repo });
+  await execute("git", ["config", "user.name", "Tests"], { cwd: repo });
+  await mkdir(join(repo, "cmd"), { recursive: true });
+  await writeFile(join(repo, path), sourceWithNamedHandler("safeSearch"));
+  await execute("git", ["add", path], { cwd: repo });
+  await execute("git", ["commit", "--quiet", "-m", "fixture"], { cwd: repo });
+
+  await writeFile(join(repo, path), sourceWithNamedHandler("unsafeSearch"));
+  const discovery = await discoverSources(changedContext(repo, [path]));
+  const analysis = await analyzeDiscovery(discovery);
+  const found = analysis.signals.filter((signal) => signal.ruleId === ruleId);
+  assert.equal(found.length, 1);
+  assert.equal(found[0]?.snippet, "unsafeSearch");
+  assert.equal(found[0]?.data.access, "args[0]");
+});
+
 function source(access: string, diagnostic: string): string {
   return `package cmd
 
@@ -196,6 +216,24 @@ func newSearchCommand() *cobra.Command {
 			${statement}
 			return search(args[0])
 		},
+	}
+}
+`;
+}
+
+function sourceWithNamedHandler(binding: string): string {
+  return `package cmd
+
+import "github.com/spf13/cobra"
+
+func safeSearch(_ *cobra.Command, args []string) error { return nil }
+func unsafeSearch(_ *cobra.Command, args []string) error { return search(args[0]) }
+
+func newSearchCommand() *cobra.Command {
+	return &cobra.Command{
+		Args: cobra.MaximumNArgs(1),
+		RunE:
+			${binding},
 	}
 }
 `;

@@ -258,6 +258,190 @@ test("resets validator and guard proofs when positional args may be reassigned",
     'import (\n\t"errors"\n\t"github.com/spf13/cobra"\n)',
   );
   assert.deepEqual(await signals(conditionallyGuarded), []);
+
+  const guardedByElseExit = command(`		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if debug {
+				args = maybeEmpty(args)
+				if len(args) > 0 { note() } else { return errors.New("empty") }
+			}
+			return search(args[0])
+		},`).replace(
+    'import "github.com/spf13/cobra"',
+    'import (\n\t"errors"\n\t"github.com/spf13/cobra"\n)',
+  );
+  assert.deepEqual(await signals(guardedByElseExit), []);
+});
+
+test("proves branch-sensitive exits but not an unsafe fallthrough", async () => {
+  const safe = command(`		Args: cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) > 0 { note() } else { return errors.New("missing") }
+			return search(args[0])
+		},`).replace(
+    'import "github.com/spf13/cobra"',
+    'import (\n\t"errors"\n\t"github.com/spf13/cobra"\n)',
+  );
+  assert.deepEqual(await signals(safe), []);
+
+  const unsafe = safe.replace('else { return errors.New("missing") }', "else { note() }");
+  assert.equal((await signals(unsafe)).length, 1);
+});
+
+test("proves loop-condition and continue guards only on their guarded iterations", async () => {
+  const conditional = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			for len(args) > 0 { return search(args[0]) }
+			return nil
+		},`);
+  assert.deepEqual(await signals(conditional), []);
+
+  const continued = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			for {
+				if len(args) == 0 { continue }
+				return search(args[0])
+			}
+		},`);
+  assert.deepEqual(await signals(continued), []);
+
+  const unsafe = continued.replace("if len(args) == 0 { continue }", "if len(args) == 0 && retry { continue }");
+  assert.equal((await signals(unsafe)).length, 1);
+});
+
+test("proves exhaustive switch length exits and rejects partial or breaking cases", async () => {
+  const exhaustive = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			switch len(args) {
+			case 0: return errors.New("missing")
+			default: return search(args[0])
+			}
+		},`).replace(
+    'import "github.com/spf13/cobra"',
+    'import (\n\t"errors"\n\t"github.com/spf13/cobra"\n)',
+  );
+  assert.deepEqual(await signals(exhaustive), []);
+
+  const prior = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			switch len(args) { case 0: return errors.New("missing") }
+			return search(args[0])
+		},`).replace(
+    'import "github.com/spf13/cobra"',
+    'import (\n\t"errors"\n\t"github.com/spf13/cobra"\n)',
+  );
+  assert.deepEqual(await signals(prior), []);
+
+  const partial = prior.replace("args[0]", "args[1]");
+  assert.equal((await signals(partial)).length, 1);
+
+  const breaking = prior.replace('return errors.New("missing")', "break");
+  assert.equal((await signals(breaking)).length, 1);
+});
+
+test("analyzes invoked closures while leaving stored closures out of scope", async () => {
+  const direct = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			func() { use(args[0]) }()
+			return nil
+		},`);
+  assert.equal((await signals(direct)).length, 1);
+
+  const deferred = direct.replace("func() { use(args[0]) }()", "defer func() { use(args[0]) }()\n\t\t\tif len(args) == 0 { return nil }");
+  assert.equal((await signals(deferred)).length, 1);
+
+  const guardedDefer = direct.replace("func() { use(args[0]) }()", "if len(args) == 0 { return nil }\n\t\t\tdefer func() { use(args[0]) }()");
+  assert.deepEqual(await signals(guardedDefer), []);
+
+  const deferredLaterWrite = command(`		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			defer func() { use(args[0]) }()
+			args = maybeEmpty(args)
+			return nil
+		},`);
+  assert.equal((await signals(deferredLaterWrite)).length, 1);
+
+  const deferredInnerGuard = deferredLaterWrite.replace(
+    "defer func() { use(args[0]) }()",
+    "defer func() { if len(args) > 0 { use(args[0]) } }()",
+  );
+  assert.deepEqual(await signals(deferredInnerGuard), []);
+
+  const launched = direct.replace("func() { use(args[0]) }()", "go func() { use(args[0]) }()");
+  assert.equal((await signals(launched)).length, 1);
+
+  const launchedLaterWrite = deferredLaterWrite.replace("defer func()", "go func()");
+  assert.equal((await signals(launchedLaterWrite)).length, 1);
+
+  const stored = direct.replace("func() { use(args[0]) }()", "later := func() { use(args[0]) }\n\t\t\t_ = later");
+  assert.deepEqual(await signals(stored), []);
+
+  const shadowed = direct.replace("func() { use(args[0]) }()", 'func(args []string) { use(args[0]) }([]string{"safe"})');
+  assert.deepEqual(await signals(shadowed), []);
+});
+
+test("uses the last reachable positional-args write and ignores identity writes", async () => {
+  const safe = command(`		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if debug { args = maybeEmpty(args) }
+			args = []string{"safe"}
+			return search(args[0])
+		},`);
+  assert.deepEqual(await signals(safe), []);
+
+  const identity = safe.replace('if debug { args = maybeEmpty(args) }\n\t\t\targs = []string{"safe"}', "args = args");
+  assert.deepEqual(await signals(identity), []);
+
+  const unsafe = safe.replace('args = []string{"safe"}', "args = maybeEmpty(args)");
+  assert.equal((await signals(unsafe)).length, 1);
+
+  const invokedAssignment = command(`		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			func() { args = maybeEmpty(args); use(args[0]) }()
+			return nil
+		},`);
+  assert.equal((await signals(invokedAssignment)).length, 1);
+});
+
+test("recognizes select receive declarations that shadow callback args", async () => {
+  const source = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			select {
+			case args := <-ch:
+				use(args[0])
+			default:
+			}
+			return nil
+		},`);
+  assert.deepEqual(await signals(source), []);
+});
+
+test("keeps adjacent nested control-flow proofs conservative", async () => {
+  const nestedExit = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				if debug { return errors.New("missing") } else { panic("missing") }
+			}
+			return search(args[0])
+		},`).replace(
+    'import "github.com/spf13/cobra"',
+    'import (\n\t"errors"\n\t"github.com/spf13/cobra"\n)',
+  );
+  assert.deepEqual(await signals(nestedExit), []);
+
+  const nestedFallthrough = nestedExit.replace('else { panic("missing") }', "else { note() }");
+  assert.equal((await signals(nestedFallthrough)).length, 1);
+
+  const switchLoop = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			for {
+				switch len(args) {
+				case 0: continue
+				default: return search(args[0])
+				}
+			}
+		},`);
+  assert.deepEqual(await signals(switchLoop), []);
+
+  const labeled = command(`		RunE: func(_ *cobra.Command, args []string) error {
+		outer: for {
+				if len(args) == 0 { continue outer }
+				return search(args[0])
+			}
+		},`);
+  assert.equal((await signals(labeled)).length, 1);
 });
 
 test("resolves exact same-file named Cobra callbacks without following arbitrary helpers", async () => {
