@@ -1,3 +1,5 @@
+import type { Node } from "web-tree-sitter";
+
 export interface SourceRevision {
   path: string;
   current: string;
@@ -51,7 +53,7 @@ export interface DomainDefinition {
   noRiskSummary: string;
   approvalSummary: string;
   includePath: (path: string) => boolean;
-  analyze: (file: SourceRevision) => {
+  analyze: (file: SourceRevision, root?: Node) => {
     signals: Signal[];
     positives: PositiveSignal[];
   };

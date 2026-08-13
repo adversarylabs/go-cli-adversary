@@ -28,6 +28,16 @@ This is a model-reviewed `flags-args` contract rather than a syntax-only rule. F
 
 ## High
 
+### `go-cli.cobra-positional-args-minimum`
+
+| | |
+| --- | --- |
+| **What** | A Cobra `Run`/`RunE` callback indexes or slices positional `args` beyond the minimum its validator or control flow proves present |
+| **Why** | Missing operands reach the callback with a shorter slice and panic instead of producing a usage error |
+| **Looks for** | Constant `args[n]` and bounded slice expressions inside Cobra command callbacks, cross-checked against `ExactArgs`, `MinimumNArgs`, `RangeArgs`, mechanically proven custom validators, and dominating `len(args)` guards |
+| **Stays quiet when** | Validation proves the required minimum; a guard or exact switch case dominates the access; the validator cannot be mechanically understood; the slice is not the callback's positional parameter; or the code is not a Cobra command callback |
+| **Remediation** | Require enough operands with Cobra validation, or return a usage error from a `len(args)` guard before indexing |
+
 ### `go-cli.exit-bypass`
 
 | | |

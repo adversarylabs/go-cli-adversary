@@ -13,9 +13,13 @@ export async function analyzeDiscovery(discovery: Discovery): Promise<Analysis> 
         const tree = await parseGo(file.current);
         try {
           if (tree.rootNode.hasError) throw new Error("Go source contains syntax errors");
+          const result = domain.analyze(file, tree.rootNode);
+          signals.push(...result.signals.filter((item) => changed(file, item.line, item.endLine)));
+          positives.push(...result.positives.filter((item) => changed(file, item.line)));
         } finally {
           tree.delete();
         }
+        continue;
       }
       const result = domain.analyze(file);
       signals.push(...result.signals.filter((item) => changed(file, item.line, item.endLine)));

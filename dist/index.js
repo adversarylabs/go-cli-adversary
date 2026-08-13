@@ -3647,7 +3647,12 @@ var require_fast_uri = __commonJS({
     }
     function resolve3(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
-      const resolved = resolveComponent(parse(baseURI, schemelessOptions), parse(relativeURI, schemelessOptions), schemelessOptions, true);
+      const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
+      const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
+      if (baseMalformed || relativeMalformed) {
+        throw new Error(baseParsed.error || relativeParsed.error || "URI is malformed.");
+      }
+      const resolved = resolveComponent(baseParsed, relativeParsed, schemelessOptions, true);
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
@@ -3773,6 +3778,7 @@ var require_fast_uri = __commonJS({
     }
     var URI_PARSE = /^(?:([^#/:?]+):)?(?:\/\/((?:([^#/?@]*)@)?(\[[^#/?\]]+\]|[^#/:?]*)(?::(\d*))?))?([^#?]*)(?:\?([^#]*))?(?:#((?:.|[\n\r])*))?/u;
     var AUTHORITY_PREFIX = /^(?:[^#/:?]+:)?\/\/([^/?#]*)/;
+    var AUTHORITY_INTRODUCER_REGION = /^(?:[^#/:?]+:)?([/\\\t\n\r]*)/;
     function getParseError(parsed, matches) {
       if (matches[2] !== void 0 && parsed.path && parsed.path[0] !== "/") {
         return 'URI path must start with "/" when authority is present.';
@@ -3806,6 +3812,20 @@ var require_fast_uri = __commonJS({
       if (authorityMatch !== null && authorityMatch[1].indexOf("\\") !== -1) {
         parsed.error = "URI authority must not contain a literal backslash.";
         malformedAuthorityOrPort = true;
+      }
+      const introducerMatch = uri.match(AUTHORITY_INTRODUCER_REGION);
+      if (introducerMatch !== null) {
+        const region = introducerMatch[1];
+        const normalizedRegion = region.replace(/[\t\n\r]/g, "");
+        if (normalizedRegion.length >= 2) {
+          if (normalizedRegion.slice(0, 2) !== "//") {
+            parsed.error = parsed.error || "URI authority must not contain a literal backslash.";
+            malformedAuthorityOrPort = true;
+          } else if (region.length !== normalizedRegion.length) {
+            parsed.error = parsed.error || "URI authority introducer must not contain whitespace.";
+            malformedAuthorityOrPort = true;
+          }
+        }
       }
       const matches = uri.match(URI_PARSE);
       if (matches) {
@@ -17116,6 +17136,333 @@ function contentSignal(file, ruleId, pattern, message, data = {}) {
   }];
 }
 
+// src/cobra-positional-args.ts
+var RULE_ID = "go-cli.cobra-positional-args-minimum";
+function cobraPositionalArgsMinimumSignals(file, root) {
+  if (root === void 0) return [];
+  const cobraAliases = importedCobraAliases(root);
+  if (cobraAliases.size === 0) return [];
+  const nonNilErrorConstructors = importedNonNilErrorConstructors(root);
+  const declarations = /* @__PURE__ */ new Map();
+  for (const declaration of root.descendantsOfType("function_declaration")) {
+    const name2 = declaration.childForFieldName("name")?.text;
+    if (name2 !== void 0) declarations.set(name2, declaration);
+  }
+  const signals = [];
+  for (const literal of root.descendantsOfType("composite_literal")) {
+    const type = literal.childForFieldName("type")?.text;
+    if (type === void 0 || ![...cobraAliases].some((alias) => type === `${alias}.Command`)) {
+      continue;
+    }
+    const fields = keyedFields(literal);
+    const callback = fields.get("RunE") ?? fields.get("Run");
+    if (callback === void 0 || callback.type !== "func_literal") continue;
+    const argsName = positionalParameterName(callback);
+    if (argsName === void 0) continue;
+    const validator = fields.get("Args");
+    const validatorMinimum = validator === void 0 ? 0 : minimumProvenByValidator(validator, declarations, cobraAliases, nonNilErrorConstructors);
+    if (validator !== void 0 && validatorMinimum === void 0) continue;
+    for (const access of positionalAccesses(callback, argsName)) {
+      if (access.required <= (validatorMinimum ?? 0)) continue;
+      if (minimumProvenAtAccess(access.node, callback, argsName) >= access.required) continue;
+      const anchor = signalAnchor(file, access.node, validator);
+      if (anchor === void 0) continue;
+      signals.push({
+        ruleId: RULE_ID,
+        path: file.path,
+        line: anchor.startPosition.row + 1,
+        endLine: anchor.endPosition.row + 1,
+        message: `${argsName} requires at least ${access.required} positional argument${access.required === 1 ? "" : "s"}, but this Cobra command only proves a minimum of ${validatorMinimum ?? 0}.`,
+        snippet: anchor.text.trim().slice(0, 300),
+        data: {
+          requiredMinimum: access.required,
+          validatorMinimum: validatorMinimum ?? 0,
+          access: access.node.text,
+          accessLine: access.node.startPosition.row + 1
+        }
+      });
+    }
+  }
+  return deduplicate(signals);
+}
+function signalAnchor(file, access, validator) {
+  if (file.status === "repository" || file.status === "added") return access;
+  if (nodeTouchesChangedLine(access, file.changedLines)) return access;
+  if (validator !== void 0 && nodeTouchesChangedLine(validator, file.changedLines)) return validator;
+  return void 0;
+}
+function nodeTouchesChangedLine(node, changedLines) {
+  for (let line = node.startPosition.row + 1; line <= node.endPosition.row + 1; line += 1) {
+    if (changedLines.has(line)) return true;
+  }
+  return false;
+}
+function importedCobraAliases(root) {
+  const aliases = /* @__PURE__ */ new Set();
+  for (const spec of root.descendantsOfType("import_spec")) {
+    const path = spec.childForFieldName("path")?.text.replace(/^`|`$/g, "").replace(/^"|"$/g, "");
+    if (path !== "github.com/spf13/cobra") continue;
+    const name2 = spec.childForFieldName("name")?.text;
+    if (name2 === "." || name2 === "_") continue;
+    aliases.add(name2 ?? "cobra");
+  }
+  return aliases;
+}
+function importedNonNilErrorConstructors(root) {
+  const constructors = /* @__PURE__ */ new Set();
+  for (const spec of root.descendantsOfType("import_spec")) {
+    const path = spec.childForFieldName("path")?.text.replace(/^`|`$/g, "").replace(/^"|"$/g, "");
+    if (path !== "errors" && path !== "fmt") continue;
+    const name2 = spec.childForFieldName("name")?.text;
+    if (name2 === ".") {
+      constructors.add(path === "errors" ? "New" : "Errorf");
+    } else if (name2 !== "_") {
+      constructors.add(`${name2 ?? path}.${path === "errors" ? "New" : "Errorf"}`);
+    }
+  }
+  return constructors;
+}
+function keyedFields(literal) {
+  const fields = /* @__PURE__ */ new Map();
+  const body2 = literal.childForFieldName("body");
+  if (body2 === null) return fields;
+  for (const element of body2.namedChildren.filter((child) => child.type === "keyed_element")) {
+    const key = unwrap(element.childForFieldName("key"));
+    const value = unwrap(element.childForFieldName("value"));
+    if (key?.type === "identifier" && value !== void 0) fields.set(key.text, value);
+  }
+  return fields;
+}
+function unwrap(node) {
+  let current = node ?? void 0;
+  while (current !== void 0 && ["literal_element", "parenthesized_expression"].includes(current.type) && current.namedChildCount === 1) {
+    current = current.namedChild(0) ?? void 0;
+  }
+  return current;
+}
+function positionalParameterName(callback) {
+  const parameters = callback.childForFieldName("parameters");
+  if (parameters === null) return void 0;
+  for (const declaration of parameters.namedChildren) {
+    const type = declaration.childForFieldName("type");
+    if (type?.text !== "[]string") continue;
+    const names = declaration.childrenForFieldName("name");
+    const name2 = names.at(-1)?.text;
+    if (name2 !== void 0 && name2 !== "_") return name2;
+  }
+  return void 0;
+}
+function minimumProvenByValidator(validator, declarations, cobraAliases, nonNilErrorConstructors) {
+  const value = unwrap(validator);
+  if (value === void 0) return void 0;
+  if (value.type === "call_expression") {
+    const functionName = value.childForFieldName("function")?.text;
+    const args2 = value.childForFieldName("arguments")?.namedChildren ?? [];
+    const known = [...cobraAliases].find((alias) => functionName?.startsWith(`${alias}.`));
+    if (known === void 0) return void 0;
+    if (functionName === `${known}.ExactArgs` || functionName === `${known}.MinimumNArgs`) {
+      return integerLiteral(args2[0]);
+    }
+    if (functionName === `${known}.RangeArgs`) return integerLiteral(args2[0]);
+    if (functionName === `${known}.MaximumNArgs` || functionName === `${known}.NoArgs`) return 0;
+    return void 0;
+  }
+  if (value.type === "func_literal") return minimumProvenByCustomValidator(value, nonNilErrorConstructors);
+  if (value.type === "identifier") {
+    const declaration = declarations.get(value.text);
+    return declaration === void 0 ? void 0 : minimumProvenByCustomValidator(declaration, nonNilErrorConstructors);
+  }
+  return void 0;
+}
+function minimumProvenByCustomValidator(fn, nonNilErrorConstructors) {
+  const argsName = positionalParameterName(fn);
+  const body2 = fn.childForFieldName("body");
+  if (argsName === void 0 || body2 === null) return void 0;
+  const statements = statementList(body2)?.namedChildren ?? [];
+  let minimum = 0;
+  let index = 0;
+  for (; index < statements.length; index += 1) {
+    const statement = statements[index];
+    if (statement.type !== "if_statement") break;
+    const consequence = statement.childForFieldName("consequence");
+    const condition = statement.childForFieldName("condition");
+    if (consequence === null || condition === null || !returnsNonNil(consequence, nonNilErrorConstructors)) break;
+    const guarded = rejectedMinimum(condition, argsName);
+    if (guarded === void 0) break;
+    minimum = Math.max(minimum, guarded);
+  }
+  const tail = statements.slice(index);
+  if (tail.length === 1 && tail[0].text.replace(/\s/g, "") === "returnnil") return minimum;
+  return minimum > 0 ? minimum : void 0;
+}
+function returnsNonNil(block, nonNilErrorConstructors) {
+  const statements = statementList(block)?.namedChildren ?? [];
+  if (statements.length === 0) return false;
+  const last = statements.at(-1);
+  if (last.type !== "return_statement") return false;
+  const value = last.namedChild(0);
+  if (value?.type !== "call_expression") return false;
+  const constructor = value.childForFieldName("function")?.text;
+  return constructor !== void 0 && nonNilErrorConstructors.has(constructor);
+}
+function positionalAccesses(callback, argsName) {
+  const accesses = [];
+  for (const node of callback.descendantsOfType(["index_expression", "slice_expression"])) {
+    if (nearestFunction(node)?.equals(callback) !== true) continue;
+    if (node.childForFieldName("operand")?.text !== argsName) continue;
+    if (isShadowedBeforeAccess(node, callback, argsName)) continue;
+    if (node.type === "index_expression") {
+      const index = integerLiteral(node.childForFieldName("index") ?? void 0);
+      if (index !== void 0) accesses.push({ node, required: index + 1 });
+      continue;
+    }
+    const start2 = integerLiteral(node.childForFieldName("start") ?? void 0) ?? 0;
+    const end = integerLiteral(node.childForFieldName("end") ?? void 0) ?? 0;
+    const capacity = integerLiteral(node.childForFieldName("capacity") ?? void 0) ?? 0;
+    const required = Math.max(start2, end, capacity);
+    if (required > 0) accesses.push({ node, required });
+  }
+  return accesses;
+}
+function nearestFunction(node) {
+  for (let current = node.parent; current !== null; current = current.parent) {
+    if (current.type === "func_literal" || current.type === "function_declaration") return current;
+  }
+  return null;
+}
+function integerLiteral(node) {
+  if (node?.type !== "int_literal" || !/^\d+$/.test(node.text)) return void 0;
+  const value = Number(node.text);
+  return Number.isSafeInteger(value) ? value : void 0;
+}
+function minimumProvenAtAccess(access, callback, argsName) {
+  let minimum = 0;
+  for (let current = access; current !== null && !current.equals(callback); current = current.parent) {
+    const parent = current.parent;
+    if (parent?.type === "if_statement") {
+      const condition = parent.childForFieldName("condition");
+      const consequence = parent.childForFieldName("consequence");
+      const alternative = parent.childForFieldName("alternative");
+      if (condition !== null && consequence !== null && contains(consequence, access)) {
+        minimum = Math.max(minimum, acceptedMinimum(condition, argsName) ?? 0);
+      } else if (condition !== null && alternative !== null && contains(alternative, access)) {
+        minimum = Math.max(minimum, rejectedMinimum(condition, argsName) ?? 0);
+      }
+    }
+    if (parent?.type === "expression_case") {
+      const switchNode = parent.parent;
+      const expression = switchNode?.childForFieldName("value") ?? switchNode?.childForFieldName("expression");
+      if (switchNode?.type === "expression_switch_statement" && expression?.text.replace(/\s/g, "") === `len(${argsName})`) {
+        const valueList = parent.childForFieldName("value");
+        const values = valueList?.type === "expression_list" ? valueList.namedChildren : valueList === null ? [] : [valueList];
+        const exact = values.map((value) => integerLiteral(value)).filter((value) => value !== void 0);
+        if (exact.length > 0) minimum = Math.max(minimum, Math.min(...exact));
+      }
+    }
+  }
+  const body2 = callback.childForFieldName("body");
+  const list = body2 === null ? void 0 : statementList(body2);
+  if (list !== void 0) {
+    const owner = directStatementContaining(list, access);
+    if (owner !== void 0) {
+      for (const prior of list.namedChildren) {
+        if (prior.equals(owner)) break;
+        if (prior.type !== "if_statement") continue;
+        const condition = prior.childForFieldName("condition");
+        const consequence = prior.childForFieldName("consequence");
+        if (condition === null || consequence === null || !alwaysExits(consequence)) continue;
+        minimum = Math.max(minimum, rejectedMinimum(condition, argsName) ?? 0);
+      }
+    }
+  }
+  return minimum;
+}
+function statementList(block) {
+  return block.namedChildren.find((child) => child.type === "statement_list");
+}
+function directStatementContaining(list, descendant) {
+  return list.namedChildren.find((statement) => contains(statement, descendant));
+}
+function isShadowedBeforeAccess(access, callback, argsName) {
+  for (let current = access.parent; current !== null && !current.equals(callback); current = current.parent) {
+    if (current.type !== "block") continue;
+    const list = statementList(current);
+    if (list === void 0) continue;
+    const owner = directStatementContaining(list, access);
+    if (owner === void 0) continue;
+    for (const prior of list.namedChildren) {
+      if (prior.equals(owner)) break;
+      if (prior.type !== "short_var_declaration") continue;
+      const left = prior.childForFieldName("left");
+      if (left?.namedChildren.some((name2) => name2.type === "identifier" && name2.text === argsName)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+function contains(ancestor, descendant) {
+  return ancestor.equals(descendant) || ancestor.childWithDescendant(descendant) !== null;
+}
+function alwaysExits(block) {
+  const statements = statementList(block)?.namedChildren ?? [];
+  const last = statements.at(-1);
+  return last?.type === "return_statement" || /\bpanic\s*\(/.test(last?.text ?? "");
+}
+function acceptedMinimum(condition, argsName) {
+  const text = normalizedCondition(condition.text);
+  const len = escaped(`len(${argsName})`);
+  return matchMinimum(text, [
+    [new RegExp(`^${len}>=(\\d+)$`), 0],
+    [new RegExp(`^${len}>(\\d+)$`), 1],
+    [new RegExp(`^${len}==(\\d+)$`), 0],
+    [new RegExp(`^(\\d+)<=${len}$`), 0],
+    [new RegExp(`^(\\d+)<${len}$`), 1],
+    [new RegExp(`^${len}!=0$`), 1, true]
+  ]);
+}
+function rejectedMinimum(condition, argsName) {
+  const text = normalizedCondition(condition.text);
+  const len = escaped(`len(${argsName})`);
+  return matchMinimum(text, [
+    [new RegExp(`^${len}<(\\d+)$`), 0],
+    [new RegExp(`^${len}<=(\\d+)$`), 1],
+    [new RegExp(`^(\\d+)>${len}$`), 0],
+    [new RegExp(`^(\\d+)>=${len}$`), 1],
+    [new RegExp(`^${len}==0$`), 1, true],
+    [new RegExp(`^${len}!=(\\d+)$`), 0]
+  ]);
+}
+function matchMinimum(text, patterns) {
+  for (const [pattern, increment, fixed] of patterns) {
+    const match = text.match(pattern);
+    if (match === null) continue;
+    if (fixed === true) return increment;
+    const literal = Number(match[1]);
+    if (Number.isSafeInteger(literal)) return literal + increment;
+  }
+  return void 0;
+}
+function normalizedCondition(text) {
+  let normalized = text.replace(/\s/g, "");
+  while (normalized.startsWith("(") && normalized.endsWith(")")) {
+    normalized = normalized.slice(1, -1);
+  }
+  return normalized;
+}
+function escaped(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function deduplicate(signals) {
+  const seen = /* @__PURE__ */ new Set();
+  return signals.filter((signal) => {
+    const key = `${signal.path}:${signal.line}:${signal.snippet}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 // src/domain.ts
 var domain = {
   name: "go-cli",
@@ -17124,6 +17471,18 @@ var domain = {
   sourceDescription: "Go CLI",
   includePath: (path) => path.endsWith(".go") && !path.endsWith("_test.go"),
   rules: [
+    {
+      id: "go-cli.cobra-positional-args-minimum",
+      title: "Cobra callback can index missing positional arguments",
+      concern: "unguarded Cobra positional argument access",
+      category: "correctness",
+      severity: "high",
+      confidence: "high",
+      summary: (count) => `${count} Cobra callback${count === 1 ? "" : "s"} can index positional arguments that validation allows to be absent.`,
+      whyItMatters: "Cobra invokes Run and RunE after Args validation, but maximum-only or missing validators still allow an empty argument slice.",
+      impact: "Invoking the command without the expected operand panics instead of returning a usage error.",
+      recommendation: "Require enough positional arguments with ExactArgs, MinimumNArgs, RangeArgs, or a mechanically equivalent validator, or guard len(args) before accessing it."
+    },
     {
       id: "go-cli.exit-bypass",
       title: "Command code terminates the process directly",
@@ -17403,9 +17762,10 @@ var domain = {
   ],
   noRiskSummary: "The reviewed command paths preserve errors, cancellation, and process-boundary ownership.",
   approvalSummary: "I would approve the reviewed CLI lifecycle and automation behavior.",
-  analyze(file) {
+  analyze(file, root) {
     return {
       signals: [
+        ...cobraPositionalArgsMinimumSignals(file, root),
         ...exitBypassSignals(file),
         ...executeErrorSignals(file),
         ...cancellationSignals(file),
@@ -21898,9 +22258,13 @@ async function analyzeDiscovery(discovery) {
         const tree = await parseGo(file.current);
         try {
           if (tree.rootNode.hasError) throw new Error("Go source contains syntax errors");
+          const result2 = domain.analyze(file, tree.rootNode);
+          signals.push(...result2.signals.filter((item) => changed(file, item.line, item.endLine)));
+          positives.push(...result2.positives.filter((item) => changed(file, item.line)));
         } finally {
           tree.delete();
         }
+        continue;
       }
       const result = domain.analyze(file);
       signals.push(...result.signals.filter((item) => changed(file, item.line, item.endLine)));

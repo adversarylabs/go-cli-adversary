@@ -2,6 +2,8 @@
 
 **go/cli** reviews Go command-line applications for predictable **process-boundary** behavior: exit ownership, cancellation, subprocess lifecycle, diagnostics streams, and automation-friendly contracts across Cobra, Viper, Kong, urfave/cli, `flag`, and hand-built commands.
 
+For Cobra commands, that includes proving positional operands are present before `Run` or `RunE` indexes them.
+
 It is a **CLI domain reviewer**, not a general Go linter. It prefers silence over style nits. When it reports, it should be something a staff engineer would block for automation or production CLI reliability.
 
 ## What it does

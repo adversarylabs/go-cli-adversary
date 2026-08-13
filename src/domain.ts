@@ -1,9 +1,11 @@
+import type { Node } from "web-tree-sitter";
 import {
   isNonProductPath,
   isProcessBoundaryExit,
   isRootSignalBootstrap,
 } from "./paths.js";
 import { contentSignal, lineSignals, positive } from "./signals.js";
+import { cobraPositionalArgsMinimumSignals } from "./cobra-positional-args.js";
 import { type DomainDefinition, type Signal, type SourceRevision } from "./types.js";
 
 export const domain: DomainDefinition = {
@@ -13,6 +15,21 @@ export const domain: DomainDefinition = {
   sourceDescription: "Go CLI",
   includePath: (path) => path.endsWith(".go") && !path.endsWith("_test.go"),
   rules: [
+    {
+      id: "go-cli.cobra-positional-args-minimum",
+      title: "Cobra callback can index missing positional arguments",
+      concern: "unguarded Cobra positional argument access",
+      category: "correctness",
+      severity: "high",
+      confidence: "high",
+      summary: (count) =>
+        `${count} Cobra callback${count === 1 ? "" : "s"} can index positional arguments that validation allows to be absent.`,
+      whyItMatters:
+        "Cobra invokes Run and RunE after Args validation, but maximum-only or missing validators still allow an empty argument slice.",
+      impact: "Invoking the command without the expected operand panics instead of returning a usage error.",
+      recommendation:
+        "Require enough positional arguments with ExactArgs, MinimumNArgs, RangeArgs, or a mechanically equivalent validator, or guard len(args) before accessing it.",
+    },
     {
       id: "go-cli.exit-bypass",
       title: "Command code terminates the process directly",
@@ -344,9 +361,10 @@ export const domain: DomainDefinition = {
   ],
   noRiskSummary: "The reviewed command paths preserve errors, cancellation, and process-boundary ownership.",
   approvalSummary: "I would approve the reviewed CLI lifecycle and automation behavior.",
-  analyze(file) {
+  analyze(file, root) {
     return {
       signals: [
+        ...cobraPositionalArgsMinimumSignals(file, root),
         ...exitBypassSignals(file),
         ...executeErrorSignals(file),
         ...cancellationSignals(file),
