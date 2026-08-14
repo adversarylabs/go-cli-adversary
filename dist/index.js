@@ -3647,7 +3647,12 @@ var require_fast_uri = __commonJS({
     }
     function resolve3(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
-      const resolved = resolveComponent(parse(baseURI, schemelessOptions), parse(relativeURI, schemelessOptions), schemelessOptions, true);
+      const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
+      const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
+      if (baseMalformed || relativeMalformed) {
+        throw new Error(baseParsed.error || relativeParsed.error || "URI is malformed.");
+      }
+      const resolved = resolveComponent(baseParsed, relativeParsed, schemelessOptions, true);
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
@@ -3773,6 +3778,7 @@ var require_fast_uri = __commonJS({
     }
     var URI_PARSE = /^(?:([^#/:?]+):)?(?:\/\/((?:([^#/?@]*)@)?(\[[^#/?\]]+\]|[^#/:?]*)(?::(\d*))?))?([^#?]*)(?:\?([^#]*))?(?:#((?:.|[\n\r])*))?/u;
     var AUTHORITY_PREFIX = /^(?:[^#/:?]+:)?\/\/([^/?#]*)/;
+    var AUTHORITY_INTRODUCER_REGION = /^(?:[^#/:?]+:)?([/\\\t\n\r]*)/;
     function getParseError(parsed, matches) {
       if (matches[2] !== void 0 && parsed.path && parsed.path[0] !== "/") {
         return 'URI path must start with "/" when authority is present.';
@@ -3806,6 +3812,20 @@ var require_fast_uri = __commonJS({
       if (authorityMatch !== null && authorityMatch[1].indexOf("\\") !== -1) {
         parsed.error = "URI authority must not contain a literal backslash.";
         malformedAuthorityOrPort = true;
+      }
+      const introducerMatch = uri.match(AUTHORITY_INTRODUCER_REGION);
+      if (introducerMatch !== null) {
+        const region = introducerMatch[1];
+        const normalizedRegion = region.replace(/[\t\n\r]/g, "");
+        if (normalizedRegion.length >= 2) {
+          if (normalizedRegion.slice(0, 2) !== "//") {
+            parsed.error = parsed.error || "URI authority must not contain a literal backslash.";
+            malformedAuthorityOrPort = true;
+          } else if (region.length !== normalizedRegion.length) {
+            parsed.error = parsed.error || "URI authority introducer must not contain whitespace.";
+            malformedAuthorityOrPort = true;
+          }
+        }
       }
       const matches = uri.match(URI_PARSE);
       if (matches) {
@@ -17116,6 +17136,830 @@ function contentSignal(file, ruleId, pattern, message, data = {}) {
   }];
 }
 
+// src/cobra-positional-args.ts
+var RULE_ID = "go-cli.cobra-positional-args-minimum";
+var GO_INTEGER = "(?:0[bB]_?[01](?:_?[01])*|0[oO]_?[0-7](?:_?[0-7])*|0[xX]_?[0-9a-fA-F](?:_?[0-9a-fA-F])*|0(?:_?[0-7])+|(?:0|[1-9](?:_?\\d)*))";
+function cobraPositionalArgsMinimumSignals(file, root) {
+  if (root === void 0) return [];
+  const cobraAliases = importedCobraAliases(root);
+  if (cobraAliases.size === 0) return [];
+  const nonNilErrorConstructors = importedNonNilErrorConstructors(root);
+  const declarations = /* @__PURE__ */ new Map();
+  for (const declaration of root.descendantsOfType("function_declaration")) {
+    const name2 = declaration.childForFieldName("name")?.text;
+    if (name2 !== void 0) declarations.set(name2, declaration);
+  }
+  const signals = [];
+  for (const literal of root.descendantsOfType("composite_literal")) {
+    const type = literal.childForFieldName("type")?.text;
+    if (type === void 0 || ![...cobraAliases].some((alias) => type === `${alias}.Command`)) {
+      continue;
+    }
+    const fields = keyedFields(literal);
+    const callbackKind = fields.has("RunE") ? "RunE" : fields.has("Run") ? "Run" : void 0;
+    const callbackValue = callbackKind === void 0 ? void 0 : fields.get(callbackKind);
+    const callback = callbackValue === void 0 || callbackKind === void 0 ? void 0 : resolveCallback(callbackValue, literal, callbackKind, declarations, cobraAliases);
+    if (callback === void 0) continue;
+    const argsName = positionalParameterName(callback);
+    if (argsName === void 0) continue;
+    const validator = fields.get("Args");
+    const validatorMinimum = validator === void 0 ? 0 : minimumProvenByValidator(validator, declarations, cobraAliases, nonNilErrorConstructors);
+    if (validator !== void 0 && validatorMinimum === void 0) continue;
+    for (const access of positionalAccesses(callback, argsName)) {
+      const assignmentState = minimumAfterAssignments(
+        access.node,
+        callback,
+        argsName,
+        validatorMinimum ?? 0
+      );
+      const assignments = assignmentState.nodes;
+      const effectiveValidatorMinimum = assignmentState.minimum;
+      if (access.required <= effectiveValidatorMinimum) continue;
+      if (minimumProvenAtAccess(access.node, callback, argsName, assignmentState.proofAfterIndex) >= access.required) continue;
+      const unwrappedCallbackValue = callbackValue === void 0 ? void 0 : unwrap(callbackValue);
+      const callbackBinding = unwrappedCallbackValue?.type === "identifier" ? unwrappedCallbackValue : void 0;
+      const evidence = [callbackBinding, validator, ...assignments, ...relevantGuardConditions(access.node, callback, argsName)].filter((node) => node !== void 0);
+      const anchor = signalAnchor(file, access.node, evidence);
+      if (anchor === void 0) continue;
+      signals.push({
+        ruleId: RULE_ID,
+        path: file.path,
+        line: anchor.startPosition.row + 1,
+        endLine: anchor.endPosition.row + 1,
+        message: `${argsName} requires at least ${access.required} positional argument${access.required === 1 ? "" : "s"}, but this Cobra command only proves a minimum of ${effectiveValidatorMinimum}.`,
+        snippet: anchor.text.trim().slice(0, 300),
+        data: {
+          requiredMinimum: access.required,
+          validatorMinimum: effectiveValidatorMinimum,
+          access: access.node.text,
+          accessLine: access.node.startPosition.row + 1
+        }
+      });
+    }
+  }
+  return deduplicate(signals);
+}
+function signalAnchor(file, access, evidence) {
+  if (file.status === "repository" || file.status === "added") return access;
+  const changedLines = file.semanticChangedLines ?? file.changedLines;
+  if (nodeTouchesSemanticChangedLine(access, changedLines)) return access;
+  for (const node of evidence) {
+    if (nodeTouchesSemanticChangedLine(node, changedLines)) return node;
+  }
+  return void 0;
+}
+function nodeTouchesSemanticChangedLine(node, changedLines) {
+  const leaves = node.namedChildCount === 0 ? [node] : semanticLeaves(node);
+  for (const leaf of leaves) {
+    if (leaf.type === "comment") continue;
+    for (let line = leaf.startPosition.row + 1; line <= leaf.endPosition.row + 1; line += 1) {
+      if (changedLines.has(line)) return true;
+    }
+  }
+  return false;
+}
+function semanticLeaves(node) {
+  const leaves = [];
+  const pending = [...node.namedChildren];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current.namedChildCount === 0) leaves.push(current);
+    else pending.push(...current.namedChildren);
+  }
+  return leaves;
+}
+function importedCobraAliases(root) {
+  const aliases = /* @__PURE__ */ new Set();
+  for (const spec of root.descendantsOfType("import_spec")) {
+    const path = spec.childForFieldName("path")?.text.replace(/^`|`$/g, "").replace(/^"|"$/g, "");
+    if (path !== "github.com/spf13/cobra") continue;
+    const name2 = spec.childForFieldName("name")?.text;
+    if (name2 === "." || name2 === "_") continue;
+    aliases.add(name2 ?? "cobra");
+  }
+  return aliases;
+}
+function importedNonNilErrorConstructors(root) {
+  const constructors = /* @__PURE__ */ new Set();
+  for (const spec of root.descendantsOfType("import_spec")) {
+    const path = spec.childForFieldName("path")?.text.replace(/^`|`$/g, "").replace(/^"|"$/g, "");
+    if (path !== "errors" && path !== "fmt") continue;
+    const name2 = spec.childForFieldName("name")?.text;
+    if (name2 === ".") {
+      constructors.add(path === "errors" ? "New" : "Errorf");
+    } else if (name2 !== "_") {
+      constructors.add(`${name2 ?? path}.${path === "errors" ? "New" : "Errorf"}`);
+    }
+  }
+  return constructors;
+}
+function keyedFields(literal) {
+  const fields = /* @__PURE__ */ new Map();
+  const body2 = literal.childForFieldName("body");
+  if (body2 === null) return fields;
+  for (const element of body2.namedChildren.filter((child) => child.type === "keyed_element")) {
+    const key = unwrap(element.childForFieldName("key"));
+    const value = unwrap(element.childForFieldName("value"));
+    if (key?.type === "identifier" && value !== void 0) fields.set(key.text, value);
+  }
+  return fields;
+}
+function unwrap(node) {
+  let current = node ?? void 0;
+  while (current !== void 0 && ["literal_element", "parenthesized_expression"].includes(current.type) && current.namedChildCount === 1) {
+    current = current.namedChild(0) ?? void 0;
+  }
+  return current;
+}
+function positionalParameterName(callback) {
+  const parameters = callback.childForFieldName("parameters");
+  if (parameters === null) return void 0;
+  for (const declaration of parameters.namedChildren) {
+    const type = declaration.childForFieldName("type");
+    if (type?.text !== "[]string") continue;
+    const names = declaration.childrenForFieldName("name");
+    const name2 = names.at(-1)?.text;
+    if (name2 !== void 0 && name2 !== "_") return name2;
+  }
+  return void 0;
+}
+function resolveCallback(value, commandLiteral, kind, declarations, cobraAliases) {
+  const callback = unwrap(value);
+  if (callback === void 0) return void 0;
+  if (callback.type === "func_literal") {
+    return hasExactCallbackSignature(callback, kind, cobraAliases) ? callback : void 0;
+  }
+  if (callback.type !== "identifier" || isNameShadowedAt(commandLiteral, callback.text)) {
+    return void 0;
+  }
+  const declaration = declarations.get(callback.text);
+  if (declaration === void 0 || !hasExactCallbackSignature(declaration, kind, cobraAliases)) {
+    return void 0;
+  }
+  return declaration;
+}
+function hasExactCallbackSignature(callback, kind, cobraAliases) {
+  const parameters = callback.childForFieldName("parameters");
+  if (parameters === null) return false;
+  const flattened = [];
+  for (const declaration of parameters.namedChildren) {
+    if (declaration.type !== "parameter_declaration") return false;
+    const type = declaration.childForFieldName("type")?.text;
+    const names = declaration.childrenForFieldName("name");
+    if (type === void 0 || names.length === 0) return false;
+    for (const name2 of names) flattened.push({ name: name2.text, type });
+  }
+  if (flattened.length !== 2) return false;
+  const commandType = flattened[0].type;
+  if (![...cobraAliases].some((alias) => commandType === `*${alias}.Command`)) return false;
+  if (flattened[1].type !== "[]string" || flattened[1].name === "_") return false;
+  const result = callback.childForFieldName("result");
+  return kind === "RunE" ? isSingleErrorResult(result) : result === null;
+}
+function isSingleErrorResult(result) {
+  if (result?.text === "error") return true;
+  if (result?.type !== "parameter_list" || result.namedChildren.length !== 1) return false;
+  const declaration = result.namedChild(0);
+  return declaration?.type === "parameter_declaration" && declaration.childForFieldName("type")?.text === "error" && declaration.childrenForFieldName("name").length === 1;
+}
+function isNameShadowedAt(reference, name2) {
+  for (let current = reference; current !== null; current = current.parent) {
+    if (current.type === "block" && priorDeclarationInBlock(current, reference, name2)) return true;
+    if (controlHeaderDeclares(current, reference, name2)) return true;
+    if (current.type === "func_literal" || current.type === "function_declaration") {
+      const parameters = current.childForFieldName("parameters");
+      if (parameters !== null && declarationNames(parameters).has(name2)) return true;
+      return false;
+    }
+  }
+  return false;
+}
+function minimumProvenByValidator(validator, declarations, cobraAliases, nonNilErrorConstructors) {
+  const value = unwrap(validator);
+  if (value === void 0) return void 0;
+  if (value.type === "call_expression") {
+    const functionName = value.childForFieldName("function")?.text;
+    const args2 = value.childForFieldName("arguments")?.namedChildren ?? [];
+    const known = [...cobraAliases].find((alias) => functionName?.startsWith(`${alias}.`));
+    if (known === void 0) return void 0;
+    if (functionName === `${known}.ExactArgs` || functionName === `${known}.MinimumNArgs`) {
+      return integerLiteral(args2[0]);
+    }
+    if (functionName === `${known}.RangeArgs`) return integerLiteral(args2[0]);
+    if (functionName === `${known}.MaximumNArgs` || functionName === `${known}.NoArgs`) return 0;
+    return void 0;
+  }
+  if (value.type === "func_literal") return minimumProvenByCustomValidator(value, nonNilErrorConstructors);
+  if (value.type === "identifier") {
+    if (isNameShadowedAt(validator, value.text)) return void 0;
+    const declaration = declarations.get(value.text);
+    return declaration === void 0 ? void 0 : minimumProvenByCustomValidator(declaration, nonNilErrorConstructors);
+  }
+  return void 0;
+}
+function minimumProvenByCustomValidator(fn, nonNilErrorConstructors) {
+  const argsName = positionalParameterName(fn);
+  const body2 = fn.childForFieldName("body");
+  if (argsName === void 0 || body2 === null) return void 0;
+  const statements = statementList(body2)?.namedChildren ?? [];
+  let minimum = 0;
+  let index = 0;
+  for (; index < statements.length; index += 1) {
+    const statement = statements[index];
+    if (statement.type !== "if_statement") break;
+    const consequence = statement.childForFieldName("consequence");
+    const condition = statement.childForFieldName("condition");
+    if (consequence === null || condition === null || !returnsNonNil(consequence, nonNilErrorConstructors)) break;
+    const guarded = rejectedMinimum(condition, argsName);
+    if (guarded === void 0) break;
+    minimum = Math.max(minimum, guarded);
+  }
+  const tail = statements.slice(index);
+  if (tail.length === 1 && tail[0].text.replace(/\s/g, "") === "returnnil") return minimum;
+  return minimum > 0 ? minimum : void 0;
+}
+function returnsNonNil(block, nonNilErrorConstructors) {
+  const statements = statementList(block)?.namedChildren ?? [];
+  if (statements.length === 0) return false;
+  const last = statements.at(-1);
+  if (last.type !== "return_statement") return false;
+  const value = last.namedChild(0);
+  if (value?.type !== "call_expression") return false;
+  const constructor = value.childForFieldName("function")?.text;
+  if (constructor === void 0 || !nonNilErrorConstructors.has(constructor)) return false;
+  const binding = constructor.split(".")[0];
+  return !isNameShadowedAt(value, binding);
+}
+function positionalAccesses(callback, argsName) {
+  const accesses = [];
+  for (const node of callback.descendantsOfType(["index_expression", "slice_expression"])) {
+    const owner = nearestFunction(node);
+    if (owner === null) continue;
+    if (!owner.equals(callback) && !isImmediatelyExecutedClosure(owner, callback)) continue;
+    if (node.childForFieldName("operand")?.text !== argsName) continue;
+    if (isArgsShadowedAt(node, callback, argsName)) continue;
+    if (node.type === "index_expression") {
+      const index = integerLiteral(node.childForFieldName("index") ?? void 0);
+      if (index !== void 0) accesses.push({ node, required: index + 1 });
+      continue;
+    }
+    const start2 = integerLiteral(node.childForFieldName("start") ?? void 0) ?? 0;
+    const end = integerLiteral(node.childForFieldName("end") ?? void 0) ?? 0;
+    const capacity = integerLiteral(node.childForFieldName("capacity") ?? void 0) ?? 0;
+    const required = Math.max(start2, end, capacity);
+    if (required > 0) accesses.push({ node, required });
+  }
+  return accesses;
+}
+function isImmediatelyExecutedClosure(owner, callback) {
+  return closureInvocation(owner, callback) !== void 0;
+}
+function closureInvocation(owner, callback) {
+  if (owner.type !== "func_literal") return void 0;
+  for (let current = owner.parent; current !== null && !current.equals(callback); current = current.parent) {
+    if (["parenthesized_expression", "literal_element"].includes(current.type)) continue;
+    if (current.type !== "call_expression") return void 0;
+    const fn = current.childForFieldName("function");
+    if (fn === null || !contains(fn, owner)) return void 0;
+    const parent = current.parent;
+    if (parent?.type === "defer_statement") return { node: parent, kind: "defer" };
+    if (parent?.type === "go_statement") return { node: parent, kind: "go" };
+    return { node: current, kind: "direct" };
+  }
+  return void 0;
+}
+function nearestFunction(node) {
+  for (let current = node.parent; current !== null; current = current.parent) {
+    if (current.type === "func_literal" || current.type === "function_declaration") return current;
+  }
+  return null;
+}
+function integerLiteral(node) {
+  if (node?.type !== "int_literal") return void 0;
+  return parseGoInteger(node.text);
+}
+function parseGoInteger(literal) {
+  const text = literal.replaceAll("_", "");
+  let value;
+  if (/^0[bB][01]+$/.test(text)) value = Number.parseInt(text.slice(2), 2);
+  else if (/^0[oO][0-7]+$/.test(text)) value = Number.parseInt(text.slice(2), 8);
+  else if (/^0[xX][0-9a-fA-F]+$/.test(text)) value = Number.parseInt(text.slice(2), 16);
+  else if (/^0[0-7]+$/.test(text) && text.length > 1) value = Number.parseInt(text.slice(1), 8);
+  else if (/^(?:0|[1-9]\d*)$/.test(text)) value = Number.parseInt(text, 10);
+  else return void 0;
+  return Number.isSafeInteger(value) ? value : void 0;
+}
+function minimumProvenAtAccess(access, callback, argsName, proofAfterIndex) {
+  let minimum = 0;
+  for (let current = access; current !== null && !current.equals(callback); current = current.parent) {
+    const parent = current.parent;
+    if (parent?.type === "if_statement") {
+      const condition = parent.childForFieldName("condition");
+      const consequence = parent.childForFieldName("consequence");
+      const alternative = parent.childForFieldName("alternative");
+      if (condition !== null && condition.endIndex > proofAfterIndex && consequence !== null && contains(consequence, access)) {
+        minimum = Math.max(minimum, acceptedMinimum(condition, argsName) ?? 0);
+      } else if (condition !== null && condition.endIndex > proofAfterIndex && alternative !== null && contains(alternative, access)) {
+        minimum = Math.max(minimum, rejectedMinimum(condition, argsName) ?? 0);
+      }
+    }
+    if (parent?.type === "for_statement") {
+      const condition = forCondition(parent);
+      const body2 = parent.childForFieldName("body");
+      if (condition !== void 0 && condition.endIndex > proofAfterIndex && body2 !== null && contains(body2, access)) {
+        minimum = Math.max(minimum, acceptedMinimum(condition, argsName) ?? 0);
+      }
+    }
+    if (parent?.type === "expression_case") {
+      const switchNode = parent.parent;
+      const expression = switchNode?.childForFieldName("value") ?? switchNode?.childForFieldName("expression");
+      if (switchNode?.type === "expression_switch_statement" && expression !== null && expression !== void 0 && expression.endIndex > proofAfterIndex && isUnshadowedLenOf(expression, argsName)) {
+        minimum = Math.max(minimum, minimumForEnteredSwitchCase(parent, switchNode));
+      }
+    }
+  }
+  for (let current = access; current !== null && !current.equals(callback); current = current.parent) {
+    if (current.type !== "block") continue;
+    const list = statementList(current);
+    const owner = list === void 0 ? void 0 : directStatementContaining(list, access);
+    if (list === void 0 || owner === void 0) continue;
+    for (const prior of list.namedChildren) {
+      if (prior.equals(owner)) break;
+      if (prior.type !== "if_statement" || prior.endIndex <= proofAfterIndex) continue;
+      const condition = prior.childForFieldName("condition");
+      const consequence = prior.childForFieldName("consequence");
+      const alternative = prior.childForFieldName("alternative");
+      if (condition === null || consequence === null) continue;
+      if (blockSkipsAccess(consequence, access)) {
+        minimum = Math.max(minimum, rejectedMinimum(condition, argsName) ?? 0);
+      } else if (alternative !== null && blockSkipsAccess(alternative, access)) {
+        minimum = Math.max(minimum, acceptedMinimum(condition, argsName) ?? 0);
+      }
+    }
+    for (const prior of list.namedChildren) {
+      if (prior.equals(owner)) break;
+      if (prior.type !== "expression_switch_statement" || prior.endIndex <= proofAfterIndex) continue;
+      minimum = Math.max(minimum, minimumAfterSwitch(prior, access, argsName));
+    }
+  }
+  minimum = Math.max(minimum, minimumFromEnclosingSwitchDefault(access, callback, argsName, proofAfterIndex));
+  return minimum;
+}
+function forCondition(statement) {
+  const clause = statement.namedChildren.find((child) => child.type === "for_clause");
+  if (clause !== void 0) return clause.childForFieldName("condition") ?? void 0;
+  return statement.namedChildren.find((child) => child.type !== "block" && child.type !== "range_clause");
+}
+function statementList(block) {
+  return block.namedChildren.find((child) => child.type === "statement_list");
+}
+function directStatementContaining(list, descendant) {
+  return list.namedChildren.find((statement) => contains(statement, descendant));
+}
+function isArgsShadowedAt(access, callback, name2) {
+  for (let current = access.parent; current !== null && !current.equals(callback); current = current.parent) {
+    if (current.type === "block" && priorDeclarationInBlock(current, access, name2)) return true;
+    if (controlHeaderDeclares(current, access, name2)) return true;
+    if (current.type === "func_literal") {
+      const parameters = current.childForFieldName("parameters");
+      if (parameters !== null && declarationNames(parameters).has(name2)) return true;
+    }
+  }
+  return false;
+}
+function priorDeclarationInBlock(block, reference, name2) {
+  const list = statementList(block);
+  const owner = list === void 0 ? void 0 : directStatementContaining(list, reference);
+  if (list === void 0 || owner === void 0) return false;
+  for (const prior of list.namedChildren) {
+    if (prior.equals(owner)) break;
+    if (declarationBindsName(prior, name2)) return true;
+  }
+  return false;
+}
+function controlHeaderDeclares(node, reference, name2) {
+  if (!contains(node, reference)) return false;
+  if (node.type === "for_statement") {
+    const clause = node.namedChildren.find((child) => child.type === "range_clause" || child.type === "for_clause");
+    if (clause?.type === "range_clause") {
+      return clause.text.includes(":=") && expressionListContainsName(clause.childForFieldName("left"), name2);
+    }
+    const initializer = clause?.childForFieldName("initializer");
+    return initializer !== null && initializer !== void 0 && declarationBindsName(initializer, name2);
+  }
+  if (["if_statement", "expression_switch_statement", "type_switch_statement"].includes(node.type)) {
+    const initializer = node.childForFieldName("initializer");
+    if (initializer !== null && declarationBindsName(initializer, name2)) return true;
+    const alias = node.childForFieldName("alias");
+    return alias?.text === name2;
+  }
+  if (node.type === "communication_case") {
+    const communication = node.childForFieldName("communication");
+    return communication?.type === "receive_statement" && communication.text.includes(":=") && expressionListContainsName(communication.childForFieldName("left"), name2);
+  }
+  return false;
+}
+function declarationBindsName(node, name2) {
+  if (node.type === "short_var_declaration") {
+    return expressionListContainsName(node.childForFieldName("left"), name2);
+  }
+  if (node.type === "var_declaration") {
+    return node.descendantsOfType("var_spec").some((spec) => declarationNames(spec).has(name2));
+  }
+  return false;
+}
+function declarationNames(node) {
+  const names = /* @__PURE__ */ new Set();
+  for (const declaration of node.descendantsOfType(["parameter_declaration", "var_spec", "const_spec", "type_spec"])) {
+    for (const name2 of declaration.childrenForFieldName("name")) names.add(name2.text);
+  }
+  return names;
+}
+function expressionListContainsName(node, name2) {
+  return node?.namedChildren.some((child) => child.type === "identifier" && child.text === name2) ?? false;
+}
+function minimumAfterAssignments(access, callback, argsName, initialMinimum) {
+  const nodes = priorAssignments(access, callback, argsName);
+  let minimum = initialMinimum;
+  for (const assignment of nodes) {
+    const assigned = Math.max(
+      assignedMinimum(assignment, argsName, minimum) ?? 0,
+      minimumProvenOnAssignmentPath(assignment, access, argsName)
+    );
+    minimum = assignmentDominatesAccess(assignment, access) ? assigned : Math.min(minimum, assigned);
+  }
+  return {
+    nodes,
+    minimum,
+    // A later outer write can run before a deferred/concurrent closure even
+    // though it appears after the closure body in source. It invalidates the
+    // validator state, but must not hide guards that execute inside the
+    // closure immediately before the access.
+    proofAfterIndex: nodes.filter((node) => node.startIndex < access.startIndex).reduce((latest, node) => Math.max(latest, node.endIndex), -1)
+  };
+}
+function minimumProvenOnAssignmentPath(assignment, access, argsName) {
+  const list = assignment.parent;
+  if (list?.type !== "statement_list") return 0;
+  let minimum = 0;
+  let afterAssignment = false;
+  for (const statement of list.namedChildren) {
+    if (statement.equals(assignment)) {
+      afterAssignment = true;
+      continue;
+    }
+    if (contains(statement, access)) break;
+    if (!afterAssignment || statement.type !== "if_statement") continue;
+    const condition = statement.childForFieldName("condition");
+    const consequence = statement.childForFieldName("consequence");
+    const alternative = statement.childForFieldName("alternative");
+    if (condition === null || consequence === null) continue;
+    if (blockSkipsAccess(consequence, access)) {
+      minimum = Math.max(minimum, rejectedMinimum(condition, argsName) ?? 0);
+    } else if (alternative !== null && blockSkipsAccess(alternative, access)) {
+      minimum = Math.max(minimum, acceptedMinimum(condition, argsName) ?? 0);
+    }
+  }
+  return minimum;
+}
+function priorAssignments(access, callback, argsName) {
+  const candidates = callback.descendantsOfType(["assignment_statement", "range_clause", "receive_statement"]);
+  const accessOwner = nearestFunction(access);
+  const delayedInvocation = accessOwner === null || accessOwner.equals(callback) ? void 0 : delayedClosureInvocation(accessOwner, callback);
+  const sorted = candidates.filter((node) => {
+    const owner = nearestFunction(node);
+    const ownerInvocation = owner === null || owner.equals(callback) ? void 0 : closureInvocation(owner, callback);
+    if (owner === null || !owner.equals(callback) && ownerInvocation === void 0 || accessOwner?.equals(callback) === true && ownerInvocation?.kind === "defer") return false;
+    const lexicallyPrior = node.startIndex < access.startIndex;
+    const laterOuterWrite = delayedInvocation !== void 0 && owner.equals(callback) && node.startIndex > delayedInvocation.endIndex;
+    if (!lexicallyPrior && !laterOuterWrite) return false;
+    if (!canReachAccessAfter(node, access, callback)) return false;
+    if (node.type === "range_clause") {
+      return !node.text.includes(":=") && expressionListContainsName(node.childForFieldName("left"), argsName);
+    }
+    if (node.type === "receive_statement") {
+      return !node.text.includes(":=") && expressionListContainsName(node.childForFieldName("left"), argsName);
+    }
+    return expressionListContainsName(node.childForFieldName("left"), argsName);
+  }).sort((left, right) => left.startIndex - right.startIndex);
+  return sorted.filter((assignment, index) => !assignmentIsNoOp(assignment, argsName) && !sorted.slice(index + 1).some((later) => unconditionallyOverwrites(assignment, later)));
+}
+function assignmentIsNoOp(assignment, argsName) {
+  return assignedValue(assignment, argsName)?.text === argsName;
+}
+function delayedClosureInvocation(owner, callback) {
+  const invocation = closureInvocation(owner, callback);
+  return invocation?.kind === "defer" || invocation?.kind === "go" ? invocation.node : void 0;
+}
+function unconditionallyOverwrites(assignment, later) {
+  return assignment.type === "assignment_statement" && later.type === "assignment_statement" && assignment.parent?.type === "statement_list" && later.parent?.equals(assignment.parent) === true;
+}
+function canReachAccessAfter(node, access, callback) {
+  for (let current = node.parent; current !== null && !current.equals(callback); current = current.parent) {
+    if (contains(current, access)) continue;
+    if (current.type === "communication_case" && current.parent?.type === "select_statement" && contains(current.parent, access)) return false;
+    if (["expression_case", "type_case", "default_case"].includes(current.type) && current.parent !== null && contains(current.parent, access) && !caseFallsThroughTo(current, access)) return false;
+    if (current.type === "block" && blockSkipsAccess(current, access)) return false;
+    if (current.type === "expression_case" || current.type === "default_case") {
+      if (caseSkipsAccess(current, access)) return false;
+    }
+  }
+  return true;
+}
+function caseFallsThroughTo(source, access) {
+  const statement = source.parent;
+  if (statement?.type !== "expression_switch_statement") return false;
+  const cases = statement.namedChildren.filter((child) => child.type === "expression_case" || child.type === "default_case");
+  const sourceIndex = cases.findIndex((item) => item.equals(source));
+  const targetIndex = cases.findIndex((item) => contains(item, access));
+  if (sourceIndex < 0 || targetIndex <= sourceIndex) return false;
+  for (let index = sourceIndex; index < targetIndex; index += 1) {
+    if (!caseFallsThrough(cases[index])) return false;
+  }
+  return true;
+}
+function assignedMinimum(assignment, argsName, currentMinimum) {
+  const value = assignedValue(assignment, argsName);
+  if (value?.type === "composite_literal" && value.childForFieldName("type")?.text === "[]string") {
+    const body2 = value.childForFieldName("body");
+    if (body2 === null) return 0;
+    let next = 0;
+    let minimum = 0;
+    for (const element of body2.namedChildren) {
+      if (element.type === "keyed_element") {
+        const key = integerLiteral(unwrap(element.childForFieldName("key")));
+        if (key === void 0) return void 0;
+        next = key + 1;
+      } else {
+        next += 1;
+      }
+      minimum = Math.max(minimum, next);
+    }
+    return minimum;
+  }
+  if (value?.type === "call_expression" && value.childForFieldName("function")?.text === "make" && !builtinIsShadowed(value, "make")) {
+    const args2 = value.childForFieldName("arguments")?.namedChildren ?? [];
+    if (args2[0]?.text === "[]string") return integerLiteral(args2[1]);
+  }
+  if (value?.type === "call_expression" && value.childForFieldName("function")?.text === "append" && !builtinIsShadowed(value, "append")) {
+    const args2 = value.childForFieldName("arguments")?.namedChildren ?? [];
+    if (args2.length === 0) return void 0;
+    const fixedAppends = args2.slice(1).filter((item) => item.type !== "variadic_argument").length;
+    const preserved = args2[0]?.text === argsName ? currentMinimum : 0;
+    return Math.max(preserved, fixedAppends);
+  }
+  return void 0;
+}
+function assignedValue(assignment, argsName) {
+  if (assignment.type !== "assignment_statement" && assignment.type !== "receive_statement") return void 0;
+  const left = assignment.childForFieldName("left")?.namedChildren ?? [];
+  const position = left.findIndex((candidate) => candidate.type === "identifier" && candidate.text === argsName);
+  if (position < 0) return void 0;
+  return assignment.childForFieldName("right")?.namedChildren[position];
+}
+function assignmentDominatesAccess(assignment, access) {
+  const list = assignment.parent;
+  if (list?.type !== "statement_list") return false;
+  const owner = directStatementContaining(list, access);
+  return owner !== void 0 && assignment.endIndex < owner.startIndex;
+}
+function relevantGuardConditions(access, callback, argsName) {
+  const conditions = [];
+  for (let current = access; current !== null && !current.equals(callback); current = current.parent) {
+    if (current.type === "if_statement") {
+      const condition = current.childForFieldName("condition");
+      if (condition !== null && condition.text.includes(`len(${argsName})`)) conditions.push(condition);
+    }
+    if (current.type === "for_statement") {
+      const condition = forCondition(current);
+      if (condition?.text.includes(`len(${argsName})`)) conditions.push(condition);
+    }
+    if (current.type === "expression_switch_statement") {
+      const expression = switchExpression(current);
+      if (expression?.text.includes(`len(${argsName})`)) conditions.push(expression);
+    }
+    if (current.type !== "block") continue;
+    const list = statementList(current);
+    const owner = list === void 0 ? void 0 : directStatementContaining(list, access);
+    if (list === void 0 || owner === void 0) continue;
+    for (const prior of list.namedChildren) {
+      if (prior.equals(owner)) break;
+      if (prior.type !== "if_statement") continue;
+      const condition = prior.childForFieldName("condition");
+      if (condition !== null && condition.text.includes(`len(${argsName})`)) conditions.push(condition);
+    }
+    for (const prior of list.namedChildren) {
+      if (prior.equals(owner)) break;
+      if (prior.type !== "expression_switch_statement") continue;
+      const expression = switchExpression(prior);
+      if (expression?.text.includes(`len(${argsName})`)) conditions.push(expression);
+    }
+  }
+  return conditions;
+}
+function contains(ancestor, descendant) {
+  return ancestor.equals(descendant) || ancestor.childWithDescendant(descendant) !== null;
+}
+function blockSkipsAccess(node, access) {
+  if (node.type === "if_statement") {
+    const consequence = node.childForFieldName("consequence");
+    const alternative = node.childForFieldName("alternative");
+    return consequence !== null && alternative !== null && blockSkipsAccess(consequence, access) && blockSkipsAccess(alternative, access);
+  }
+  const statements = statementList(node)?.namedChildren ?? node.namedChildren;
+  const last = statements.at(-1);
+  return last !== void 0 && terminalSkipsAccess(last, access);
+}
+function terminalSkipsAccess(statement, access) {
+  if (statement.type === "return_statement") return true;
+  if (statement.type === "if_statement") return blockSkipsAccess(statement, access);
+  if (statement.type === "expression_switch_statement" || statement.type === "type_switch_statement") {
+    return exhaustiveSwitchSkipsAccess(statement, access);
+  }
+  if (statement.type === "expression_statement") {
+    const expression = statement.namedChild(0);
+    return expression?.type === "call_expression" && expression.childForFieldName("function")?.text === "panic" && !builtinIsShadowed(expression, "panic");
+  }
+  if (statement.namedChildCount > 0) return false;
+  if (statement.type === "continue_statement") {
+    if (statement.text.trim() !== "continue") return false;
+    const loop = nearestAncestor(statement, /* @__PURE__ */ new Set(["for_statement"]));
+    return loop !== void 0 && contains(loop, access);
+  }
+  if (statement.type === "break_statement") {
+    if (statement.text.trim() !== "break") return false;
+    const target = nearestAncestor(statement, /* @__PURE__ */ new Set([
+      "for_statement",
+      "expression_switch_statement",
+      "type_switch_statement",
+      "select_statement"
+    ]));
+    return target !== void 0 && contains(target, access);
+  }
+  return false;
+}
+function exhaustiveSwitchSkipsAccess(statement, access) {
+  const cases = statement.namedChildren.filter((child) => child.type === "expression_case" || child.type === "type_case" || child.type === "default_case");
+  if (cases.length === 0 || !cases.some((item) => item.type === "default_case")) return false;
+  return cases.every((_, index) => {
+    let target = index;
+    while (caseFallsThrough(cases[target])) {
+      target += 1;
+      if (target >= cases.length) return false;
+    }
+    return caseSkipsAccess(cases[target], access);
+  });
+}
+function builtinIsShadowed(reference, name2) {
+  if (isNameShadowedAt(reference, name2)) return true;
+  let root = reference;
+  while (root.parent !== null) root = root.parent;
+  for (const declaration of root.namedChildren) {
+    if (declaration.type === "function_declaration" && declaration.childForFieldName("name")?.text === name2) {
+      return true;
+    }
+    if (["var_declaration", "const_declaration", "type_declaration"].includes(declaration.type) && declarationNames(declaration).has(name2)) return true;
+  }
+  return false;
+}
+function nearestAncestor(node, types) {
+  for (let current = node.parent; current !== null; current = current.parent) {
+    if (types.has(current.type)) return current;
+  }
+  return void 0;
+}
+function minimumAfterSwitch(statement, access, argsName) {
+  const expression = switchExpression(statement);
+  if (expression === void 0 || !isUnshadowedLenOf(expression, argsName)) return 0;
+  const cases = statement.namedChildren.filter((child) => child.type === "expression_case" || child.type === "default_case");
+  const explicit = /* @__PURE__ */ new Map();
+  let fallback;
+  for (const item of cases) {
+    const values = switchCaseValues(item);
+    if (values === void 0) return 0;
+    if (values.length === 0) fallback = item;
+    for (const value of values) explicit.set(value, item);
+  }
+  const max = Math.max(0, ...explicit.keys());
+  for (let value = 0; value <= max + 1; value += 1) {
+    const item = explicit.get(value) ?? fallback;
+    if (item === void 0 || !caseSkipsAccess(item, access)) return value;
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
+function minimumFromEnclosingSwitchDefault(access, callback, argsName, proofAfterIndex) {
+  for (let current = access; current !== null && !current.equals(callback); current = current.parent) {
+    if (current.type !== "default_case") continue;
+    const statement = current.parent;
+    const expression = statement?.type === "expression_switch_statement" ? switchExpression(statement) : void 0;
+    if (statement === null || statement === void 0 || expression === void 0 || expression.endIndex <= proofAfterIndex || !isUnshadowedLenOf(expression, argsName)) return 0;
+    const covered = /* @__PURE__ */ new Set();
+    for (const item of statement.namedChildren.filter((child) => child.type === "expression_case" && !child.equals(current))) {
+      const values = switchCaseValues(item);
+      if (values === void 0 || caseFallsThrough(item)) return 0;
+      for (const value of values) covered.add(value);
+    }
+    let minimum = 0;
+    while (covered.has(minimum)) minimum += 1;
+    return minimum;
+  }
+  return 0;
+}
+function switchExpression(statement) {
+  return statement.childForFieldName("value") ?? statement.childForFieldName("expression") ?? statement.namedChildren.find((child) => child.type !== "expression_case");
+}
+function isUnshadowedLenOf(expression, argsName) {
+  return expression.text.replace(/\s/g, "") === `len(${argsName})` && !builtinIsShadowed(expression, "len");
+}
+function switchCaseValues(item) {
+  const value = item.childForFieldName("value");
+  if (value === null) return [];
+  const nodes = value.type === "expression_list" ? value.namedChildren : [value];
+  const values = nodes.map((node) => integerLiteral(node));
+  return values.every((item2) => item2 !== void 0) ? values : void 0;
+}
+function minimumForEnteredSwitchCase(item, statement) {
+  const cases = statement.namedChildren.filter((child) => child.type === "expression_case" || child.type === "default_case");
+  let index = cases.findIndex((candidate) => candidate.equals(item));
+  if (index < 0) return 0;
+  const possible = [];
+  const own = switchCaseValues(cases[index]);
+  if (own === void 0 || own.length === 0) return 0;
+  possible.push(...own);
+  while (index > 0 && caseFallsThrough(cases[index - 1])) {
+    index -= 1;
+    const predecessor = switchCaseValues(cases[index]);
+    if (predecessor === void 0 || predecessor.length === 0) return 0;
+    possible.push(...predecessor);
+  }
+  return Math.min(...possible);
+}
+function caseSkipsAccess(item, access) {
+  const statements = statementList(item)?.namedChildren ?? [];
+  const last = statements.at(-1);
+  return last !== void 0 && terminalSkipsAccess(last, access);
+}
+function caseFallsThrough(item) {
+  return statementList(item)?.namedChildren.at(-1)?.type === "fallthrough_statement";
+}
+function acceptedMinimum(condition, argsName) {
+  if (builtinIsShadowed(condition, "len")) return void 0;
+  const text = normalizedCondition(condition.text);
+  const len = escaped(`len(${argsName})`);
+  const nonzero = text.match(new RegExp(`^${len}!=(${GO_INTEGER})$`));
+  if (nonzero !== null && parseGoInteger(nonzero[1]) === 0) return 1;
+  return matchMinimum(text, [
+    [new RegExp(`^${len}>=(${GO_INTEGER})$`), 0],
+    [new RegExp(`^${len}>(${GO_INTEGER})$`), 1],
+    [new RegExp(`^${len}==(${GO_INTEGER})$`), 0],
+    [new RegExp(`^(${GO_INTEGER})<=${len}$`), 0],
+    [new RegExp(`^(${GO_INTEGER})<${len}$`), 1]
+  ]);
+}
+function rejectedMinimum(condition, argsName) {
+  if (builtinIsShadowed(condition, "len")) return void 0;
+  const text = normalizedCondition(condition.text);
+  const len = escaped(`len(${argsName})`);
+  const empty = text.match(new RegExp(`^${len}==(${GO_INTEGER})$`));
+  if (empty !== null && parseGoInteger(empty[1]) === 0) return 1;
+  return matchMinimum(text, [
+    [new RegExp(`^${len}<(${GO_INTEGER})$`), 0],
+    [new RegExp(`^${len}<=(${GO_INTEGER})$`), 1],
+    [new RegExp(`^(${GO_INTEGER})>${len}$`), 0],
+    [new RegExp(`^(${GO_INTEGER})>=${len}$`), 1],
+    [new RegExp(`^${len}!=(${GO_INTEGER})$`), 0]
+  ]);
+}
+function matchMinimum(text, patterns) {
+  for (const [pattern, increment, fixed] of patterns) {
+    const match = text.match(pattern);
+    if (match === null) continue;
+    if (fixed === true) return increment;
+    const literal = parseGoInteger(match[1]);
+    if (literal !== void 0) return literal + increment;
+  }
+  return void 0;
+}
+function normalizedCondition(text) {
+  let normalized = text.replace(/\s/g, "");
+  while (normalized.startsWith("(") && normalized.endsWith(")")) {
+    normalized = normalized.slice(1, -1);
+  }
+  return normalized;
+}
+function escaped(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function deduplicate(signals) {
+  const seen = /* @__PURE__ */ new Set();
+  return signals.filter((signal) => {
+    const key = `${signal.path}:${signal.line}:${signal.snippet}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 // src/domain.ts
 var domain = {
   name: "go-cli",
@@ -17124,6 +17968,18 @@ var domain = {
   sourceDescription: "Go CLI",
   includePath: (path) => path.endsWith(".go") && !path.endsWith("_test.go"),
   rules: [
+    {
+      id: "go-cli.cobra-positional-args-minimum",
+      title: "Cobra callback can index missing positional arguments",
+      concern: "unguarded Cobra positional argument access",
+      category: "correctness",
+      severity: "high",
+      confidence: "high",
+      summary: (count) => `${count} Cobra callback${count === 1 ? "" : "s"} can index positional arguments that validation allows to be absent.`,
+      whyItMatters: "Cobra invokes Run and RunE after Args validation, but maximum-only or missing validators still allow an empty argument slice.",
+      impact: "Invoking the command without the expected operand panics instead of returning a usage error.",
+      recommendation: "Require enough positional arguments with ExactArgs, MinimumNArgs, RangeArgs, or a mechanically equivalent validator, or guard len(args) before accessing it."
+    },
     {
       id: "go-cli.exit-bypass",
       title: "Command code terminates the process directly",
@@ -17403,9 +18259,10 @@ var domain = {
   ],
   noRiskSummary: "The reviewed command paths preserve errors, cancellation, and process-boundary ownership.",
   approvalSummary: "I would approve the reviewed CLI lifecycle and automation behavior.",
-  analyze(file) {
+  analyze(file, root) {
     return {
       signals: [
+        ...cobraPositionalArgsMinimumSignals(file, root),
         ...exitBypassSignals(file),
         ...executeErrorSignals(file),
         ...cancellationSignals(file),
@@ -21898,9 +22755,13 @@ async function analyzeDiscovery(discovery) {
         const tree = await parseGo(file.current);
         try {
           if (tree.rootNode.hasError) throw new Error("Go source contains syntax errors");
+          const result2 = domain.analyze(file, tree.rootNode);
+          signals.push(...result2.signals.filter((item) => changed(file, item.line, item.endLine)));
+          positives.push(...result2.positives.filter((item) => changed(file, item.line)));
         } finally {
           tree.delete();
         }
+        continue;
       }
       const result = domain.analyze(file);
       signals.push(...result.signals.filter((item) => changed(file, item.line, item.endLine)));
@@ -21958,6 +22819,7 @@ async function discoverSources(ctx) {
       path: source.path,
       current: source.content,
       changedLines: change.changedLines,
+      ...change.semanticChangedLines === void 0 ? {} : { semanticChangedLines: change.semanticChangedLines },
       status: change.status
     });
   }
@@ -21970,14 +22832,18 @@ async function discoverSources(ctx) {
 async function changedSource(ctx, path) {
   const base = ctx.change?.baseRef;
   if (base === void 0 || !await existsAtRevision(ctx.repoPath, base, path)) {
-    return { changedLines: /* @__PURE__ */ new Set(), status: "added" };
+    return { changedLines: /* @__PURE__ */ new Set(), semanticChangedLines: /* @__PURE__ */ new Set(), status: "added" };
   }
   const args2 = ["diff", "--unified=0", base];
   const head = ctx.change?.headRef;
   if (head !== void 0 && !ctx.change?.worktree) args2.push(head);
   args2.push("--", path);
   const patch = await gitOutput(ctx.repoPath, args2);
-  return { changedLines: changedLineNumbers(patch), status: "modified" };
+  return {
+    changedLines: changedLineNumbers(patch),
+    semanticChangedLines: semanticChangedLineNumbers(patch),
+    status: "modified"
+  };
 }
 async function existsAtRevision(repoPath, revision, path) {
   try {
@@ -22004,6 +22870,43 @@ function changedLineNumbers(patch) {
     for (let line = start2; line < start2 + count; line += 1) lines.add(line);
   }
   return lines;
+}
+function semanticChangedLineNumbers(patch) {
+  const semantic = /* @__PURE__ */ new Set();
+  const lines = patch.split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const header = lines[index]?.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+    if (header === null || header === void 0) {
+      index += 1;
+      continue;
+    }
+    let currentLine = Number(header[1]);
+    const removed = [];
+    const added = [];
+    index += 1;
+    while (index < lines.length && !lines[index].startsWith("@@ ")) {
+      const line = lines[index];
+      if (line.startsWith("-") && !line.startsWith("---")) removed.push(line.slice(1));
+      if (line.startsWith("+") && !line.startsWith("+++")) {
+        added.push({ line: currentLine, text: line.slice(1) });
+        currentLine += 1;
+      } else if (line.startsWith(" ")) {
+        currentLine += 1;
+      }
+      index += 1;
+    }
+    for (let addedIndex = 0; addedIndex < added.length; addedIndex += 1) {
+      const addition = added[addedIndex];
+      const addedCode = stripGoComments(addition.text).trim();
+      const removedCode = stripGoComments(removed[addedIndex] ?? "").trim();
+      if (addedCode !== "" && addedCode !== removedCode) semantic.add(addition.line);
+    }
+  }
+  return semantic;
+}
+function stripGoComments(line) {
+  return line.replace(/\/\/.*$/, "").replace(/\/\*.*?\*\//g, "");
 }
 
 // src/model-review.ts
@@ -22619,7 +23522,7 @@ function positiveSummary(base, count) {
 function createApp() {
   const app = new Adversary({
     name: domain.name,
-    version: "0.0.24",
+    version: "0.0.25",
     // Domain already ranks and caps findings; keep SDK cap aligned.
     review: { maximumFindings: 3, minimumConfidence: "medium" }
   });

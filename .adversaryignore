@@ -9,3 +9,4 @@ tsconfig.json
 AGENTS.md
 CHECKS.md
 .gitignore
+.git
