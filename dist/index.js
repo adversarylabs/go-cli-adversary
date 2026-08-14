@@ -17138,6 +17138,7 @@ function contentSignal(file, ruleId, pattern, message, data = {}) {
 
 // src/cobra-positional-args.ts
 var RULE_ID = "go-cli.cobra-positional-args-minimum";
+var GO_INTEGER = "(?:0[bB]_?[01](?:_?[01])*|0[oO]_?[0-7](?:_?[0-7])*|0[xX]_?[0-9a-fA-F](?:_?[0-9a-fA-F])*|0(?:_?[0-7])+|(?:0|[1-9](?:_?\\d)*))";
 function cobraPositionalArgsMinimumSignals(file, root) {
   if (root === void 0) return [];
   const cobraAliases = importedCobraAliases(root);
@@ -17434,8 +17435,18 @@ function nearestFunction(node) {
   return null;
 }
 function integerLiteral(node) {
-  if (node?.type !== "int_literal" || !/^\d+$/.test(node.text)) return void 0;
-  const value = Number(node.text);
+  if (node?.type !== "int_literal") return void 0;
+  return parseGoInteger(node.text);
+}
+function parseGoInteger(literal) {
+  const text = literal.replaceAll("_", "");
+  let value;
+  if (/^0[bB][01]+$/.test(text)) value = Number.parseInt(text.slice(2), 2);
+  else if (/^0[oO][0-7]+$/.test(text)) value = Number.parseInt(text.slice(2), 8);
+  else if (/^0[xX][0-9a-fA-F]+$/.test(text)) value = Number.parseInt(text.slice(2), 16);
+  else if (/^0[0-7]+$/.test(text) && text.length > 1) value = Number.parseInt(text.slice(1), 8);
+  else if (/^(?:0|[1-9]\d*)$/.test(text)) value = Number.parseInt(text, 10);
+  else return void 0;
   return Number.isSafeInteger(value) ? value : void 0;
 }
 function minimumProvenAtAccess(access, callback, argsName, proofAfterIndex) {
@@ -17462,7 +17473,7 @@ function minimumProvenAtAccess(access, callback, argsName, proofAfterIndex) {
     if (parent?.type === "expression_case") {
       const switchNode = parent.parent;
       const expression = switchNode?.childForFieldName("value") ?? switchNode?.childForFieldName("expression");
-      if (switchNode?.type === "expression_switch_statement" && expression !== null && expression !== void 0 && expression.endIndex > proofAfterIndex && expression.text.replace(/\s/g, "") === `len(${argsName})`) {
+      if (switchNode?.type === "expression_switch_statement" && expression !== null && expression !== void 0 && expression.endIndex > proofAfterIndex && isUnshadowedLenOf(expression, argsName)) {
         minimum = Math.max(minimum, minimumForEnteredSwitchCase(parent, switchNode));
       }
     }
@@ -17671,13 +17682,26 @@ function assignedMinimum(assignment, argsName, currentMinimum) {
   const value = assignedValue(assignment, argsName);
   if (value?.type === "composite_literal" && value.childForFieldName("type")?.text === "[]string") {
     const body2 = value.childForFieldName("body");
-    return body2?.namedChildren.length ?? 0;
+    if (body2 === null) return 0;
+    let next = 0;
+    let minimum = 0;
+    for (const element of body2.namedChildren) {
+      if (element.type === "keyed_element") {
+        const key = integerLiteral(unwrap(element.childForFieldName("key")));
+        if (key === void 0) return void 0;
+        next = key + 1;
+      } else {
+        next += 1;
+      }
+      minimum = Math.max(minimum, next);
+    }
+    return minimum;
   }
-  if (value?.type === "call_expression" && value.childForFieldName("function")?.text === "make") {
+  if (value?.type === "call_expression" && value.childForFieldName("function")?.text === "make" && !builtinIsShadowed(value, "make")) {
     const args2 = value.childForFieldName("arguments")?.namedChildren ?? [];
     if (args2[0]?.text === "[]string") return integerLiteral(args2[1]);
   }
-  if (value?.type === "call_expression" && value.childForFieldName("function")?.text === "append") {
+  if (value?.type === "call_expression" && value.childForFieldName("function")?.text === "append" && !builtinIsShadowed(value, "append")) {
     const args2 = value.childForFieldName("arguments")?.namedChildren ?? [];
     if (args2.length === 0) return void 0;
     const fixedAppends = args2.slice(1).filter((item) => item.type !== "variadic_argument").length;
@@ -17754,7 +17778,7 @@ function terminalSkipsAccess(statement, access) {
   }
   if (statement.type === "expression_statement") {
     const expression = statement.namedChild(0);
-    return expression?.type === "call_expression" && expression.childForFieldName("function")?.text === "panic" && !builtinPanicIsShadowed(expression);
+    return expression?.type === "call_expression" && expression.childForFieldName("function")?.text === "panic" && !builtinIsShadowed(expression, "panic");
   }
   if (statement.namedChildCount > 0) return false;
   if (statement.type === "continue_statement") {
@@ -17786,15 +17810,15 @@ function exhaustiveSwitchSkipsAccess(statement, access) {
     return caseSkipsAccess(cases[target], access);
   });
 }
-function builtinPanicIsShadowed(reference) {
-  if (isNameShadowedAt(reference, "panic")) return true;
+function builtinIsShadowed(reference, name2) {
+  if (isNameShadowedAt(reference, name2)) return true;
   let root = reference;
   while (root.parent !== null) root = root.parent;
   for (const declaration of root.namedChildren) {
-    if (declaration.type === "function_declaration" && declaration.childForFieldName("name")?.text === "panic") {
+    if (declaration.type === "function_declaration" && declaration.childForFieldName("name")?.text === name2) {
       return true;
     }
-    if (["var_declaration", "const_declaration", "type_declaration"].includes(declaration.type) && declarationNames(declaration).has("panic")) return true;
+    if (["var_declaration", "const_declaration", "type_declaration"].includes(declaration.type) && declarationNames(declaration).has(name2)) return true;
   }
   return false;
 }
@@ -17806,7 +17830,7 @@ function nearestAncestor(node, types) {
 }
 function minimumAfterSwitch(statement, access, argsName) {
   const expression = switchExpression(statement);
-  if (expression?.text.replace(/\s/g, "") !== `len(${argsName})`) return 0;
+  if (expression === void 0 || !isUnshadowedLenOf(expression, argsName)) return 0;
   const cases = statement.namedChildren.filter((child) => child.type === "expression_case" || child.type === "default_case");
   const explicit = /* @__PURE__ */ new Map();
   let fallback;
@@ -17828,7 +17852,7 @@ function minimumFromEnclosingSwitchDefault(access, callback, argsName, proofAfte
     if (current.type !== "default_case") continue;
     const statement = current.parent;
     const expression = statement?.type === "expression_switch_statement" ? switchExpression(statement) : void 0;
-    if (statement === null || statement === void 0 || expression === void 0 || expression.endIndex <= proofAfterIndex || expression.text.replace(/\s/g, "") !== `len(${argsName})`) return 0;
+    if (statement === null || statement === void 0 || expression === void 0 || expression.endIndex <= proofAfterIndex || !isUnshadowedLenOf(expression, argsName)) return 0;
     const covered = /* @__PURE__ */ new Set();
     for (const item of statement.namedChildren.filter((child) => child.type === "expression_case" && !child.equals(current))) {
       const values = switchCaseValues(item);
@@ -17843,6 +17867,9 @@ function minimumFromEnclosingSwitchDefault(access, callback, argsName, proofAfte
 }
 function switchExpression(statement) {
   return statement.childForFieldName("value") ?? statement.childForFieldName("expression") ?? statement.namedChildren.find((child) => child.type !== "expression_case");
+}
+function isUnshadowedLenOf(expression, argsName) {
+  return expression.text.replace(/\s/g, "") === `len(${argsName})` && !builtinIsShadowed(expression, "len");
 }
 function switchCaseValues(item) {
   const value = item.childForFieldName("value");
@@ -17876,27 +17903,31 @@ function caseFallsThrough(item) {
   return statementList(item)?.namedChildren.at(-1)?.type === "fallthrough_statement";
 }
 function acceptedMinimum(condition, argsName) {
+  if (builtinIsShadowed(condition, "len")) return void 0;
   const text = normalizedCondition(condition.text);
   const len = escaped(`len(${argsName})`);
+  const nonzero = text.match(new RegExp(`^${len}!=(${GO_INTEGER})$`));
+  if (nonzero !== null && parseGoInteger(nonzero[1]) === 0) return 1;
   return matchMinimum(text, [
-    [new RegExp(`^${len}>=(\\d+)$`), 0],
-    [new RegExp(`^${len}>(\\d+)$`), 1],
-    [new RegExp(`^${len}==(\\d+)$`), 0],
-    [new RegExp(`^(\\d+)<=${len}$`), 0],
-    [new RegExp(`^(\\d+)<${len}$`), 1],
-    [new RegExp(`^${len}!=0$`), 1, true]
+    [new RegExp(`^${len}>=(${GO_INTEGER})$`), 0],
+    [new RegExp(`^${len}>(${GO_INTEGER})$`), 1],
+    [new RegExp(`^${len}==(${GO_INTEGER})$`), 0],
+    [new RegExp(`^(${GO_INTEGER})<=${len}$`), 0],
+    [new RegExp(`^(${GO_INTEGER})<${len}$`), 1]
   ]);
 }
 function rejectedMinimum(condition, argsName) {
+  if (builtinIsShadowed(condition, "len")) return void 0;
   const text = normalizedCondition(condition.text);
   const len = escaped(`len(${argsName})`);
+  const empty = text.match(new RegExp(`^${len}==(${GO_INTEGER})$`));
+  if (empty !== null && parseGoInteger(empty[1]) === 0) return 1;
   return matchMinimum(text, [
-    [new RegExp(`^${len}<(\\d+)$`), 0],
-    [new RegExp(`^${len}<=(\\d+)$`), 1],
-    [new RegExp(`^(\\d+)>${len}$`), 0],
-    [new RegExp(`^(\\d+)>=${len}$`), 1],
-    [new RegExp(`^${len}==0$`), 1, true],
-    [new RegExp(`^${len}!=(\\d+)$`), 0]
+    [new RegExp(`^${len}<(${GO_INTEGER})$`), 0],
+    [new RegExp(`^${len}<=(${GO_INTEGER})$`), 1],
+    [new RegExp(`^(${GO_INTEGER})>${len}$`), 0],
+    [new RegExp(`^(${GO_INTEGER})>=${len}$`), 1],
+    [new RegExp(`^${len}!=(${GO_INTEGER})$`), 0]
   ]);
 }
 function matchMinimum(text, patterns) {
@@ -17904,8 +17935,8 @@ function matchMinimum(text, patterns) {
     const match = text.match(pattern);
     if (match === null) continue;
     if (fixed === true) return increment;
-    const literal = Number(match[1]);
-    if (Number.isSafeInteger(literal)) return literal + increment;
+    const literal = parseGoInteger(match[1]);
+    if (literal !== void 0) return literal + increment;
   }
   return void 0;
 }

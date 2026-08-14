@@ -575,6 +575,112 @@ test("proves the minimum preserved or added by append", async () => {
   assert.deepEqual(await signals(preserved), []);
 });
 
+test("parses Go integer literal forms in accesses, validators, and guards", async () => {
+  for (const [literal, required] of [
+    ["0b10", 3],
+    ["0o10", 9],
+    ["010", 9],
+    ["0x10", 17],
+    ["1_0", 11],
+  ] as const) {
+    const unsafe = command(`		Args: cobra.MaximumNArgs(32),
+		RunE: func(_ *cobra.Command, args []string) error { return search(args[${literal}]) },`);
+    const found = await signals(unsafe);
+    assert.equal(found.length, 1, literal);
+    assert.equal(found[0]?.data.requiredMinimum, required, literal);
+
+    const guarded = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) < ${literal} + 1 { return errors.New("missing") }
+			return search(args[${literal}])
+		},`).replace(
+      'import "github.com/spf13/cobra"',
+      'import (\n\t"errors"\n\t"github.com/spf13/cobra"\n)',
+    );
+    // Arithmetic guard expressions are intentionally outside the exact proof.
+    assert.equal((await signals(guarded)).length, 1, `arithmetic ${literal}`);
+  }
+
+  for (const literal of ["0b1", "0o1", "01", "0x1", "0_1"]) {
+    const safe = command(`		Args: cobra.MinimumNArgs(${literal}),
+		RunE: func(_ *cobra.Command, args []string) error { return search(args[0]) },`);
+    assert.deepEqual(await signals(safe), [], literal);
+
+    const guarded = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) < ${literal} { return errors.New("missing") }
+			return search(args[0])
+		},`).replace(
+      'import "github.com/spf13/cobra"',
+      'import (\n\t"errors"\n\t"github.com/spf13/cobra"\n)',
+    );
+    assert.deepEqual(await signals(guarded), [], `guard ${literal}`);
+  }
+});
+
+test("trusts len, append, and make only when their builtin bindings are unshadowed", async () => {
+  const shadowedLen = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			len := func([]string) int { return 1 }
+			if len(args) > 0 { return search(args[0]) }
+			return nil
+		},`);
+  assert.equal((await signals(shadowedLen)).length, 1);
+
+  const packageLen = shadowedLen
+    .replace("\t\t\tlen := func([]string) int { return 1 }\n", "")
+    .replace("func newSearchCommand", "func len([]string) int { return 1 }\n\nfunc newSearchCommand");
+  assert.equal((await signals(packageLen)).length, 1);
+
+  const shadowedAppend = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			append := func([]string, string) []string { return nil }
+			args = append(args, "fallback")
+			return search(args[0])
+		},`);
+  assert.equal((await signals(shadowedAppend)).length, 1);
+
+  const shadowedMake = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			make := func([]string, int) []string { return nil }
+			args = make([]string, 1)
+			return search(args[0])
+		},`);
+  assert.equal((await signals(shadowedMake)).length, 1);
+
+  const packageAppend = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			args = append(args, "fallback")
+			return search(args[0])
+		},`).replace(
+    "func newSearchCommand",
+    "func append([]string, string) []string { return nil }\n\nfunc newSearchCommand",
+  );
+  assert.equal((await signals(packageAppend)).length, 1);
+
+  const nestedLen = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			func(len func([]string) int) {
+				if len(args) > 0 { search(args[0]) }
+			}(func([]string) int { return 1 })
+			return nil
+		},`);
+  assert.equal((await signals(nestedLen)).length, 1);
+});
+
+test("derives slice literal minimum from numeric keyed indices", async () => {
+  const keyed = command(`		RunE: func(_ *cobra.Command, args []string) error {
+			args = []string{3: "fourth"}
+			return search(args[3])
+		},`);
+  assert.deepEqual(await signals(keyed), []);
+
+  const mixed = keyed.replace('[]string{3: "fourth"}', '[]string{"first", 3: "fourth", "fifth"}').replace("args[3]", "args[4]");
+  assert.deepEqual(await signals(mixed), []);
+
+  const keyedHex = keyed.replace("3:", "0x3:");
+  assert.deepEqual(await signals(keyedHex), []);
+
+  const unknown = keyed.replace("3:", "slot:");
+  assert.equal((await signals(unknown)).length, 1);
+
+  const keyedBinary = keyed.replace("3:", "0b_11:");
+  assert.deepEqual(await signals(keyedBinary), []);
+});
+
 test("recognizes an exhaustive nested switch as a short-input exit", async () => {
   const safe = command(`		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
