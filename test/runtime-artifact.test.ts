@@ -95,6 +95,6 @@ test("the published runtime executes without node_modules", async () => {
   const envelope = JSON.parse(await readFile(output, "utf8"));
   assert.equal(envelope.protocolVersion, 1);
   assert.equal(envelope.result.adversary.name, "go-cli");
-  assert.equal(envelope.result.adversary.version, "0.0.24");
+  assert.equal(envelope.result.adversary.version, "0.0.25");
   assert.deepEqual(envelope.result.findings, []);
 });

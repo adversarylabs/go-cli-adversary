@@ -17350,6 +17350,7 @@ function minimumProvenByValidator(validator, declarations, cobraAliases, nonNilE
   }
   if (value.type === "func_literal") return minimumProvenByCustomValidator(value, nonNilErrorConstructors);
   if (value.type === "identifier") {
+    if (isNameShadowedAt(validator, value.text)) return void 0;
     const declaration = declarations.get(value.text);
     return declaration === void 0 ? void 0 : minimumProvenByCustomValidator(declaration, nonNilErrorConstructors);
   }
@@ -17384,7 +17385,9 @@ function returnsNonNil(block, nonNilErrorConstructors) {
   const value = last.namedChild(0);
   if (value?.type !== "call_expression") return false;
   const constructor = value.childForFieldName("function")?.text;
-  return constructor !== void 0 && nonNilErrorConstructors.has(constructor);
+  if (constructor === void 0 || !nonNilErrorConstructors.has(constructor)) return false;
+  const binding = constructor.split(".")[0];
+  return !isNameShadowedAt(value, binding);
 }
 function positionalAccesses(callback, argsName) {
   const accesses = [];
@@ -17408,14 +17411,21 @@ function positionalAccesses(callback, argsName) {
   return accesses;
 }
 function isImmediatelyExecutedClosure(owner, callback) {
-  if (owner.type !== "func_literal") return false;
+  return closureInvocation(owner, callback) !== void 0;
+}
+function closureInvocation(owner, callback) {
+  if (owner.type !== "func_literal") return void 0;
   for (let current = owner.parent; current !== null && !current.equals(callback); current = current.parent) {
     if (["parenthesized_expression", "literal_element"].includes(current.type)) continue;
-    if (current.type !== "call_expression") return false;
+    if (current.type !== "call_expression") return void 0;
     const fn = current.childForFieldName("function");
-    return fn !== null && contains(fn, owner);
+    if (fn === null || !contains(fn, owner)) return void 0;
+    const parent = current.parent;
+    if (parent?.type === "defer_statement") return { node: parent, kind: "defer" };
+    if (parent?.type === "go_statement") return { node: parent, kind: "go" };
+    return { node: current, kind: "direct" };
   }
-  return false;
+  return void 0;
 }
 function nearestFunction(node) {
   for (let current = node.parent; current !== null; current = current.parent) {
@@ -17453,10 +17463,7 @@ function minimumProvenAtAccess(access, callback, argsName, proofAfterIndex) {
       const switchNode = parent.parent;
       const expression = switchNode?.childForFieldName("value") ?? switchNode?.childForFieldName("expression");
       if (switchNode?.type === "expression_switch_statement" && expression !== null && expression !== void 0 && expression.endIndex > proofAfterIndex && expression.text.replace(/\s/g, "") === `len(${argsName})`) {
-        const valueList = parent.childForFieldName("value");
-        const values = valueList?.type === "expression_list" ? valueList.namedChildren : valueList === null ? [] : [valueList];
-        const exact = values.map((value) => integerLiteral(value)).filter((value) => value !== void 0);
-        if (exact.length > 0) minimum = Math.max(minimum, Math.min(...exact));
+        minimum = Math.max(minimum, minimumForEnteredSwitchCase(parent, switchNode));
       }
     }
   }
@@ -17552,7 +17559,7 @@ function declarationBindsName(node, name2) {
 }
 function declarationNames(node) {
   const names = /* @__PURE__ */ new Set();
-  for (const declaration of node.descendantsOfType(["parameter_declaration", "var_spec"])) {
+  for (const declaration of node.descendantsOfType(["parameter_declaration", "var_spec", "const_spec", "type_spec"])) {
     for (const name2 of declaration.childrenForFieldName("name")) names.add(name2.text);
   }
   return names;
@@ -17565,7 +17572,7 @@ function minimumAfterAssignments(access, callback, argsName, initialMinimum) {
   let minimum = initialMinimum;
   for (const assignment of nodes) {
     const assigned = Math.max(
-      assignedMinimum(assignment, argsName) ?? 0,
+      assignedMinimum(assignment, argsName, minimum) ?? 0,
       minimumProvenOnAssignmentPath(assignment, access, argsName)
     );
     minimum = assignmentDominatesAccess(assignment, access) ? assigned : Math.min(minimum, assigned);
@@ -17605,17 +17612,21 @@ function minimumProvenOnAssignmentPath(assignment, access, argsName) {
   return minimum;
 }
 function priorAssignments(access, callback, argsName) {
-  const candidates = callback.descendantsOfType(["assignment_statement", "range_clause"]);
+  const candidates = callback.descendantsOfType(["assignment_statement", "range_clause", "receive_statement"]);
   const accessOwner = nearestFunction(access);
   const delayedInvocation = accessOwner === null || accessOwner.equals(callback) ? void 0 : delayedClosureInvocation(accessOwner, callback);
   const sorted = candidates.filter((node) => {
     const owner = nearestFunction(node);
-    if (owner === null || !owner.equals(callback) && !isImmediatelyExecutedClosure(owner, callback)) return false;
+    const ownerInvocation = owner === null || owner.equals(callback) ? void 0 : closureInvocation(owner, callback);
+    if (owner === null || !owner.equals(callback) && ownerInvocation === void 0 || accessOwner?.equals(callback) === true && ownerInvocation?.kind === "defer") return false;
     const lexicallyPrior = node.startIndex < access.startIndex;
     const laterOuterWrite = delayedInvocation !== void 0 && owner.equals(callback) && node.startIndex > delayedInvocation.endIndex;
     if (!lexicallyPrior && !laterOuterWrite) return false;
     if (!canReachAccessAfter(node, access, callback)) return false;
     if (node.type === "range_clause") {
+      return !node.text.includes(":=") && expressionListContainsName(node.childForFieldName("left"), argsName);
+    }
+    if (node.type === "receive_statement") {
       return !node.text.includes(":=") && expressionListContainsName(node.childForFieldName("left"), argsName);
     }
     return expressionListContainsName(node.childForFieldName("left"), argsName);
@@ -17626,14 +17637,8 @@ function assignmentIsNoOp(assignment, argsName) {
   return assignedValue(assignment, argsName)?.text === argsName;
 }
 function delayedClosureInvocation(owner, callback) {
-  for (let current = owner.parent; current !== null && !current.equals(callback); current = current.parent) {
-    if (["parenthesized_expression", "literal_element"].includes(current.type)) continue;
-    if (current.type !== "call_expression") return void 0;
-    const fn = current.childForFieldName("function");
-    if (fn === null || !contains(fn, owner)) return void 0;
-    return current.parent?.type === "defer_statement" || current.parent?.type === "go_statement" ? current.parent : void 0;
-  }
-  return void 0;
+  const invocation = closureInvocation(owner, callback);
+  return invocation?.kind === "defer" || invocation?.kind === "go" ? invocation.node : void 0;
 }
 function unconditionallyOverwrites(assignment, later) {
   return assignment.type === "assignment_statement" && later.type === "assignment_statement" && assignment.parent?.type === "statement_list" && later.parent?.equals(assignment.parent) === true;
@@ -17641,6 +17646,8 @@ function unconditionallyOverwrites(assignment, later) {
 function canReachAccessAfter(node, access, callback) {
   for (let current = node.parent; current !== null && !current.equals(callback); current = current.parent) {
     if (contains(current, access)) continue;
+    if (current.type === "communication_case" && current.parent?.type === "select_statement" && contains(current.parent, access)) return false;
+    if (["expression_case", "type_case", "default_case"].includes(current.type) && current.parent !== null && contains(current.parent, access) && !caseFallsThroughTo(current, access)) return false;
     if (current.type === "block" && blockSkipsAccess(current, access)) return false;
     if (current.type === "expression_case" || current.type === "default_case") {
       if (caseSkipsAccess(current, access)) return false;
@@ -17648,7 +17655,19 @@ function canReachAccessAfter(node, access, callback) {
   }
   return true;
 }
-function assignedMinimum(assignment, argsName) {
+function caseFallsThroughTo(source, access) {
+  const statement = source.parent;
+  if (statement?.type !== "expression_switch_statement") return false;
+  const cases = statement.namedChildren.filter((child) => child.type === "expression_case" || child.type === "default_case");
+  const sourceIndex = cases.findIndex((item) => item.equals(source));
+  const targetIndex = cases.findIndex((item) => contains(item, access));
+  if (sourceIndex < 0 || targetIndex <= sourceIndex) return false;
+  for (let index = sourceIndex; index < targetIndex; index += 1) {
+    if (!caseFallsThrough(cases[index])) return false;
+  }
+  return true;
+}
+function assignedMinimum(assignment, argsName, currentMinimum) {
   const value = assignedValue(assignment, argsName);
   if (value?.type === "composite_literal" && value.childForFieldName("type")?.text === "[]string") {
     const body2 = value.childForFieldName("body");
@@ -17658,10 +17677,17 @@ function assignedMinimum(assignment, argsName) {
     const args2 = value.childForFieldName("arguments")?.namedChildren ?? [];
     if (args2[0]?.text === "[]string") return integerLiteral(args2[1]);
   }
+  if (value?.type === "call_expression" && value.childForFieldName("function")?.text === "append") {
+    const args2 = value.childForFieldName("arguments")?.namedChildren ?? [];
+    if (args2.length === 0) return void 0;
+    const fixedAppends = args2.slice(1).filter((item) => item.type !== "variadic_argument").length;
+    const preserved = args2[0]?.text === argsName ? currentMinimum : 0;
+    return Math.max(preserved, fixedAppends);
+  }
   return void 0;
 }
 function assignedValue(assignment, argsName) {
-  if (assignment.type !== "assignment_statement") return void 0;
+  if (assignment.type !== "assignment_statement" && assignment.type !== "receive_statement") return void 0;
   const left = assignment.childForFieldName("left")?.namedChildren ?? [];
   const position = left.findIndex((candidate) => candidate.type === "identifier" && candidate.text === argsName);
   if (position < 0) return void 0;
@@ -17723,9 +17749,12 @@ function blockSkipsAccess(node, access) {
 function terminalSkipsAccess(statement, access) {
   if (statement.type === "return_statement") return true;
   if (statement.type === "if_statement") return blockSkipsAccess(statement, access);
+  if (statement.type === "expression_switch_statement" || statement.type === "type_switch_statement") {
+    return exhaustiveSwitchSkipsAccess(statement, access);
+  }
   if (statement.type === "expression_statement") {
     const expression = statement.namedChild(0);
-    return expression?.type === "call_expression" && expression.childForFieldName("function")?.text === "panic";
+    return expression?.type === "call_expression" && expression.childForFieldName("function")?.text === "panic" && !builtinPanicIsShadowed(expression);
   }
   if (statement.namedChildCount > 0) return false;
   if (statement.type === "continue_statement") {
@@ -17742,6 +17771,30 @@ function terminalSkipsAccess(statement, access) {
       "select_statement"
     ]));
     return target !== void 0 && contains(target, access);
+  }
+  return false;
+}
+function exhaustiveSwitchSkipsAccess(statement, access) {
+  const cases = statement.namedChildren.filter((child) => child.type === "expression_case" || child.type === "type_case" || child.type === "default_case");
+  if (cases.length === 0 || !cases.some((item) => item.type === "default_case")) return false;
+  return cases.every((_, index) => {
+    let target = index;
+    while (caseFallsThrough(cases[target])) {
+      target += 1;
+      if (target >= cases.length) return false;
+    }
+    return caseSkipsAccess(cases[target], access);
+  });
+}
+function builtinPanicIsShadowed(reference) {
+  if (isNameShadowedAt(reference, "panic")) return true;
+  let root = reference;
+  while (root.parent !== null) root = root.parent;
+  for (const declaration of root.namedChildren) {
+    if (declaration.type === "function_declaration" && declaration.childForFieldName("name")?.text === "panic") {
+      return true;
+    }
+    if (["var_declaration", "const_declaration", "type_declaration"].includes(declaration.type) && declarationNames(declaration).has("panic")) return true;
   }
   return false;
 }
@@ -17797,6 +17850,22 @@ function switchCaseValues(item) {
   const nodes = value.type === "expression_list" ? value.namedChildren : [value];
   const values = nodes.map((node) => integerLiteral(node));
   return values.every((item2) => item2 !== void 0) ? values : void 0;
+}
+function minimumForEnteredSwitchCase(item, statement) {
+  const cases = statement.namedChildren.filter((child) => child.type === "expression_case" || child.type === "default_case");
+  let index = cases.findIndex((candidate) => candidate.equals(item));
+  if (index < 0) return 0;
+  const possible = [];
+  const own = switchCaseValues(cases[index]);
+  if (own === void 0 || own.length === 0) return 0;
+  possible.push(...own);
+  while (index > 0 && caseFallsThrough(cases[index - 1])) {
+    index -= 1;
+    const predecessor = switchCaseValues(cases[index]);
+    if (predecessor === void 0 || predecessor.length === 0) return 0;
+    possible.push(...predecessor);
+  }
+  return Math.min(...possible);
 }
 function caseSkipsAccess(item, access) {
   const statements = statementList(item)?.namedChildren ?? [];
@@ -23422,7 +23491,7 @@ function positiveSummary(base, count) {
 function createApp() {
   const app = new Adversary({
     name: domain.name,
-    version: "0.0.24",
+    version: "0.0.25",
     // Domain already ranks and caps findings; keep SDK cap aligned.
     review: { maximumFindings: 3, minimumConfidence: "medium" }
   });

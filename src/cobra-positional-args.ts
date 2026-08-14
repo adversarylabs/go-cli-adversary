@@ -272,6 +272,7 @@ function minimumProvenByValidator(
   }
   if (value.type === "func_literal") return minimumProvenByCustomValidator(value, nonNilErrorConstructors);
   if (value.type === "identifier") {
+    if (isNameShadowedAt(validator, value.text)) return undefined;
     const declaration = declarations.get(value.text);
     return declaration === undefined
       ? undefined
@@ -317,7 +318,9 @@ function returnsNonNil(block: Node, nonNilErrorConstructors: Set<string>): boole
   // These standard constructors are documented to always return a non-nil
   // error. An arbitrary call or identifier could still evaluate to nil, so it
   // cannot mechanically prove that the validator rejects the short input.
-  return constructor !== undefined && nonNilErrorConstructors.has(constructor);
+  if (constructor === undefined || !nonNilErrorConstructors.has(constructor)) return false;
+  const binding = constructor.split(".")[0]!;
+  return !isNameShadowedAt(value, binding);
 }
 
 interface PositionalAccess {
@@ -348,14 +351,25 @@ function positionalAccesses(callback: Node, argsName: string): PositionalAccess[
 }
 
 function isImmediatelyExecutedClosure(owner: Node, callback: Node): boolean {
-  if (owner.type !== "func_literal") return false;
+  return closureInvocation(owner, callback) !== undefined;
+}
+
+function closureInvocation(
+  owner: Node,
+  callback: Node,
+): { node: Node; kind: "direct" | "defer" | "go" } | undefined {
+  if (owner.type !== "func_literal") return undefined;
   for (let current: Node | null = owner.parent; current !== null && !current.equals(callback); current = current.parent) {
     if (["parenthesized_expression", "literal_element"].includes(current.type)) continue;
-    if (current.type !== "call_expression") return false;
+    if (current.type !== "call_expression") return undefined;
     const fn = current.childForFieldName("function");
-    return fn !== null && contains(fn, owner);
+    if (fn === null || !contains(fn, owner)) return undefined;
+    const parent = current.parent;
+    if (parent?.type === "defer_statement") return { node: parent, kind: "defer" };
+    if (parent?.type === "go_statement") return { node: parent, kind: "go" };
+    return { node: current, kind: "direct" };
   }
-  return false;
+  return undefined;
 }
 
 function nearestFunction(node: Node): Node | null {
@@ -422,10 +436,7 @@ function minimumProvenAtAccess(
         expression.endIndex > proofAfterIndex &&
         expression.text.replace(/\s/g, "") === `len(${argsName})`
       ) {
-        const valueList = parent.childForFieldName("value");
-        const values = valueList?.type === "expression_list" ? valueList.namedChildren : valueList === null ? [] : [valueList];
-        const exact = values.map((value) => integerLiteral(value)).filter((value): value is number => value !== undefined);
-        if (exact.length > 0) minimum = Math.max(minimum, Math.min(...exact));
+        minimum = Math.max(minimum, minimumForEnteredSwitchCase(parent, switchNode));
       }
     }
   }
@@ -532,7 +543,7 @@ function declarationBindsName(node: Node, name: string): boolean {
 
 function declarationNames(node: Node): Set<string> {
   const names = new Set<string>();
-  for (const declaration of node.descendantsOfType(["parameter_declaration", "var_spec"])) {
+  for (const declaration of node.descendantsOfType(["parameter_declaration", "var_spec", "const_spec", "type_spec"])) {
     for (const name of declaration.childrenForFieldName("name")) names.add(name.text);
   }
   return names;
@@ -558,7 +569,7 @@ function minimumAfterAssignments(
   let minimum = initialMinimum;
   for (const assignment of nodes) {
     const assigned = Math.max(
-      assignedMinimum(assignment, argsName) ?? 0,
+      assignedMinimum(assignment, argsName, minimum) ?? 0,
       minimumProvenOnAssignmentPath(assignment, access, argsName),
     );
     minimum = assignmentDominatesAccess(assignment, access) ? assigned : Math.min(minimum, assigned);
@@ -602,7 +613,7 @@ function minimumProvenOnAssignmentPath(assignment: Node, access: Node, argsName:
 }
 
 function priorAssignments(access: Node, callback: Node, argsName: string): Node[] {
-  const candidates = callback.descendantsOfType(["assignment_statement", "range_clause"]);
+  const candidates = callback.descendantsOfType(["assignment_statement", "range_clause", "receive_statement"]);
   const accessOwner = nearestFunction(access);
   const delayedInvocation = accessOwner === null || accessOwner.equals(callback)
     ? undefined
@@ -610,9 +621,13 @@ function priorAssignments(access: Node, callback: Node, argsName: string): Node[
   const sorted = candidates
     .filter((node) => {
       const owner = nearestFunction(node);
+      const ownerInvocation = owner === null || owner.equals(callback)
+        ? undefined
+        : closureInvocation(owner, callback);
       if (
         owner === null ||
-        (!owner.equals(callback) && !isImmediatelyExecutedClosure(owner, callback))
+        (!owner.equals(callback) && ownerInvocation === undefined) ||
+        (accessOwner?.equals(callback) === true && ownerInvocation?.kind === "defer")
       ) return false;
       const lexicallyPrior = node.startIndex < access.startIndex;
       const laterOuterWrite = delayedInvocation !== undefined &&
@@ -621,6 +636,9 @@ function priorAssignments(access: Node, callback: Node, argsName: string): Node[
       if (!lexicallyPrior && !laterOuterWrite) return false;
       if (!canReachAccessAfter(node, access, callback)) return false;
       if (node.type === "range_clause") {
+        return !node.text.includes(":=") && expressionListContainsName(node.childForFieldName("left"), argsName);
+      }
+      if (node.type === "receive_statement") {
         return !node.text.includes(":=") && expressionListContainsName(node.childForFieldName("left"), argsName);
       }
       return expressionListContainsName(node.childForFieldName("left"), argsName);
@@ -636,16 +654,8 @@ function assignmentIsNoOp(assignment: Node, argsName: string): boolean {
 }
 
 function delayedClosureInvocation(owner: Node, callback: Node): Node | undefined {
-  for (let current: Node | null = owner.parent; current !== null && !current.equals(callback); current = current.parent) {
-    if (["parenthesized_expression", "literal_element"].includes(current.type)) continue;
-    if (current.type !== "call_expression") return undefined;
-    const fn = current.childForFieldName("function");
-    if (fn === null || !contains(fn, owner)) return undefined;
-    return current.parent?.type === "defer_statement" || current.parent?.type === "go_statement"
-      ? current.parent
-      : undefined;
-  }
-  return undefined;
+  const invocation = closureInvocation(owner, callback);
+  return invocation?.kind === "defer" || invocation?.kind === "go" ? invocation.node : undefined;
 }
 
 function unconditionallyOverwrites(assignment: Node, later: Node): boolean {
@@ -658,6 +668,11 @@ function unconditionallyOverwrites(assignment: Node, later: Node): boolean {
 function canReachAccessAfter(node: Node, access: Node, callback: Node): boolean {
   for (let current = node.parent; current !== null && !current.equals(callback); current = current.parent) {
     if (contains(current, access)) continue;
+    if (current.type === "communication_case" && current.parent?.type === "select_statement" &&
+      contains(current.parent, access)) return false;
+    if (["expression_case", "type_case", "default_case"].includes(current.type) &&
+      current.parent !== null && contains(current.parent, access) &&
+      !caseFallsThroughTo(current, access)) return false;
     if (current.type === "block" && blockSkipsAccess(current, access)) return false;
     if (current.type === "expression_case" || current.type === "default_case") {
       if (caseSkipsAccess(current, access)) return false;
@@ -666,7 +681,21 @@ function canReachAccessAfter(node: Node, access: Node, callback: Node): boolean 
   return true;
 }
 
-function assignedMinimum(assignment: Node, argsName: string): number | undefined {
+function caseFallsThroughTo(source: Node, access: Node): boolean {
+  const statement = source.parent;
+  if (statement?.type !== "expression_switch_statement") return false;
+  const cases = statement.namedChildren.filter((child) =>
+    child.type === "expression_case" || child.type === "default_case");
+  const sourceIndex = cases.findIndex((item) => item.equals(source));
+  const targetIndex = cases.findIndex((item) => contains(item, access));
+  if (sourceIndex < 0 || targetIndex <= sourceIndex) return false;
+  for (let index = sourceIndex; index < targetIndex; index += 1) {
+    if (!caseFallsThrough(cases[index]!)) return false;
+  }
+  return true;
+}
+
+function assignedMinimum(assignment: Node, argsName: string, currentMinimum: number): number | undefined {
   const value = assignedValue(assignment, argsName);
   if (value?.type === "composite_literal" && value.childForFieldName("type")?.text === "[]string") {
     const body = value.childForFieldName("body");
@@ -676,11 +705,18 @@ function assignedMinimum(assignment: Node, argsName: string): number | undefined
     const args = value.childForFieldName("arguments")?.namedChildren ?? [];
     if (args[0]?.text === "[]string") return integerLiteral(args[1]);
   }
+  if (value?.type === "call_expression" && value.childForFieldName("function")?.text === "append") {
+    const args = value.childForFieldName("arguments")?.namedChildren ?? [];
+    if (args.length === 0) return undefined;
+    const fixedAppends = args.slice(1).filter((item) => item.type !== "variadic_argument").length;
+    const preserved = args[0]?.text === argsName ? currentMinimum : 0;
+    return Math.max(preserved, fixedAppends);
+  }
   return undefined;
 }
 
 function assignedValue(assignment: Node, argsName: string): Node | undefined {
-  if (assignment.type !== "assignment_statement") return undefined;
+  if (assignment.type !== "assignment_statement" && assignment.type !== "receive_statement") return undefined;
   const left = assignment.childForFieldName("left")?.namedChildren ?? [];
   const position = left.findIndex((candidate) => candidate.type === "identifier" && candidate.text === argsName);
   if (position < 0) return undefined;
@@ -748,9 +784,14 @@ function blockSkipsAccess(node: Node, access: Node): boolean {
 function terminalSkipsAccess(statement: Node, access: Node): boolean {
   if (statement.type === "return_statement") return true;
   if (statement.type === "if_statement") return blockSkipsAccess(statement, access);
+  if (statement.type === "expression_switch_statement" || statement.type === "type_switch_statement") {
+    return exhaustiveSwitchSkipsAccess(statement, access);
+  }
   if (statement.type === "expression_statement") {
     const expression = statement.namedChild(0);
-    return expression?.type === "call_expression" && expression.childForFieldName("function")?.text === "panic";
+    return expression?.type === "call_expression" &&
+      expression.childForFieldName("function")?.text === "panic" &&
+      !builtinPanicIsShadowed(expression);
   }
   if (statement.namedChildCount > 0) return false;
   if (statement.type === "continue_statement") {
@@ -767,6 +808,34 @@ function terminalSkipsAccess(statement: Node, access: Node): boolean {
       "select_statement",
     ]));
     return target !== undefined && contains(target, access);
+  }
+  return false;
+}
+
+function exhaustiveSwitchSkipsAccess(statement: Node, access: Node): boolean {
+  const cases = statement.namedChildren.filter((child) =>
+    child.type === "expression_case" || child.type === "type_case" || child.type === "default_case");
+  if (cases.length === 0 || !cases.some((item) => item.type === "default_case")) return false;
+  return cases.every((_, index) => {
+    let target = index;
+    while (caseFallsThrough(cases[target]!)) {
+      target += 1;
+      if (target >= cases.length) return false;
+    }
+    return caseSkipsAccess(cases[target]!, access);
+  });
+}
+
+function builtinPanicIsShadowed(reference: Node): boolean {
+  if (isNameShadowedAt(reference, "panic")) return true;
+  let root: Node = reference;
+  while (root.parent !== null) root = root.parent;
+  for (const declaration of root.namedChildren) {
+    if (declaration.type === "function_declaration" && declaration.childForFieldName("name")?.text === "panic") {
+      return true;
+    }
+    if (["var_declaration", "const_declaration", "type_declaration"].includes(declaration.type) &&
+      declarationNames(declaration).has("panic")) return true;
   }
   return false;
 }
@@ -839,6 +908,24 @@ function switchCaseValues(item: Node): number[] | undefined {
   const nodes = value.type === "expression_list" ? value.namedChildren : [value];
   const values = nodes.map((node) => integerLiteral(node));
   return values.every((item): item is number => item !== undefined) ? values : undefined;
+}
+
+function minimumForEnteredSwitchCase(item: Node, statement: Node): number {
+  const cases = statement.namedChildren.filter((child) =>
+    child.type === "expression_case" || child.type === "default_case");
+  let index = cases.findIndex((candidate) => candidate.equals(item));
+  if (index < 0) return 0;
+  const possible: number[] = [];
+  const own = switchCaseValues(cases[index]!);
+  if (own === undefined || own.length === 0) return 0;
+  possible.push(...own);
+  while (index > 0 && caseFallsThrough(cases[index - 1]!)) {
+    index -= 1;
+    const predecessor = switchCaseValues(cases[index]!);
+    if (predecessor === undefined || predecessor.length === 0) return 0;
+    possible.push(...predecessor);
+  }
+  return Math.min(...possible);
 }
 
 function caseSkipsAccess(item: Node, access: Node): boolean {
