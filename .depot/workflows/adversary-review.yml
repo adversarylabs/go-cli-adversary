@@ -11,6 +11,7 @@ jobs:
   review:
     permissions:
       contents: read
+      id-token: write
       pull-requests: write
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -29,3 +30,5 @@ jobs:
           model-provider: fireworks
           model: ${{ vars.ADVERSARY_MODEL }}
           model-api-key: ${{ secrets.FIREWORKS_API_KEY }}
+          auth-mode: oidc
+          registry-namespace: adversarylabs
