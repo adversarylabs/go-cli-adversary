@@ -786,9 +786,12 @@ test("wave B: model prompt prioritizes contract stories and schema allows new ca
   assert.match(GO_CLI_MODEL_PROMPT, /JSON \/ machine-output contract skew/);
   assert.match(GO_CLI_MODEL_PROMPT, /Provisional configuration outside an existing experimental boundary/);
   assert.match(GO_CLI_MODEL_PROMPT, /Incomplete configuration across a runtime operation family/);
+  assert.match(GO_CLI_MODEL_PROMPT, /Operand grammar drift across sibling modes/);
   assert.match(GO_CLI_MODEL_PROMPT, /Do not equate novelty with experimental status/);
   assert.match(GO_CLI_MODEL_PROMPT, /Do not infer a family from naming similarity alone/);
   assert.match(GO_CLI_MODEL_PROMPT, /aggregate, inherited, or separate configuration path/);
+  assert.match(GO_CLI_MODEL_PROMPT, /Do not infer a shared operand from similar variable names alone/);
+  assert.match(GO_CLI_MODEL_PROMPT, /explicitly documented compatibility extension/);
   assert.match(GO_CLI_MODEL_PROMPT, /Do NOT restate static lifecycle hits/);
   const categories = (
     GO_CLI_MODEL_SCHEMA as {
@@ -798,6 +801,123 @@ test("wave B: model prompt prioritizes contract stories and schema allows new ca
   for (const needed of ["json-contract", "deprecation", "validation-order", "dry-run"]) {
     assert.ok(categories.includes(needed), `missing category ${needed}`);
   }
+});
+
+test("mockgen-shaped sibling modes expose a changed operand grammar mismatch", async () => {
+  const root = await writeCliFixture("mockgen-operand-grammar", {
+    "cmd/mockgen/parse.go": `package main
+
+import (
+	"flag"
+	"strings"
+)
+
+// reflect mode: mockgen package/path InterfaceOne,InterfaceTwo
+func reflectMode() []string {
+	return strings.Split(flag.Arg(1), ",")
+}
+
+// source mode: mockgen -source file.go [InterfaceOne,InterfaceTwo]
+func sourceMode() map[string]struct{} {
+	include := map[string]struct{}{}
+	for _, arg := range flag.Args() {
+		for _, name := range strings.Split(arg, ",") {
+			include[name] = struct{}{}
+		}
+	}
+	return include
+}
+`,
+  });
+  const model = capturingModel({
+    assessment: {
+      risk: "low",
+      summary: "Source mode introduces a different operand grammar for the same interface list.",
+    },
+    ship: true,
+    observations: [
+      {
+        id: "sibling-operand-grammar",
+        title: "Source mode uses a different interface-list grammar",
+        category: "flags-args",
+        severity: "low",
+        confidence: "high",
+        summary: "Reflect mode accepts one comma-separated interface operand while source mode also accepts multiple positional interface operands.",
+        whyItMatters: "Users and scripts must group the same interface list differently depending on the selected mode.",
+        recommendation: "Accept one comma-separated interface operand in source mode or explicitly document and normalize the compatibility extension.",
+        evidenceIds: ["file:cmd/mockgen/parse.go"],
+      },
+    ],
+  });
+
+  const result = await runWithModel(root, model, {
+    base_ref: "main",
+    head_ref: "HEAD",
+    scan_mode: "changed",
+    changed_files: ["cmd/mockgen/parse.go"],
+  });
+
+  const request = model.requests.find((item) => !isConcernRewriteRequest(item));
+  assert.ok(request);
+  assertBoundedGoCliRequest(request);
+  const prepared = request.input as { sources: Array<{ path: string; content: string }> };
+  const source = prepared.sources.find((item) => item.path === "cmd/mockgen/parse.go");
+  assert.match(source?.content ?? "", /reflectMode/);
+  assert.match(source?.content ?? "", /for _, arg := range flag\.Args\(\)/);
+  assert.deepEqual(
+    result.observations
+      .filter((item) => item.key.startsWith("go-cli.model."))
+      .map((item) => item.metadata?.category),
+    ["flags-args"],
+  );
+  assert.equal(result.opinion?.ship, true);
+});
+
+test("accepted mockgen-shaped source mode reuses the sibling operand grammar", async () => {
+  const root = await writeCliFixture("mockgen-operand-grammar-clean", {
+    "cmd/mockgen/parse.go": `package main
+
+import (
+	"errors"
+	"flag"
+	"strings"
+)
+
+// reflect mode: mockgen package/path InterfaceOne,InterfaceTwo
+func reflectMode() []string {
+	return strings.Split(flag.Arg(1), ",")
+}
+
+// source mode: mockgen -source file.go [InterfaceOne,InterfaceTwo]
+func sourceMode() ([]string, error) {
+	if flag.NArg() > 1 {
+		return nil, errors.New("-source mode accepts at most one argument")
+	}
+	if flag.NArg() == 1 {
+		return strings.Split(flag.Arg(0), ","), nil
+	}
+	return nil, nil
+}
+`,
+  });
+  const model = capturingModel({
+    assessment: { risk: "none", summary: "Sibling modes use one comma-separated interface operand." },
+    ship: true,
+    observations: [],
+  });
+
+  const result = await runWithModel(root, model, {
+    base_ref: "main",
+    head_ref: "HEAD",
+    scan_mode: "changed",
+    changed_files: ["cmd/mockgen/parse.go"],
+  });
+
+  assert.equal(
+    result.observations.filter((item) => item.key.startsWith("go-cli.model.")).length,
+    0,
+  );
+  assert.equal(result.opinion?.ship, true);
 });
 
 test("SPIRE-shaped configuration change exposes provisional placement and family completeness evidence", async () => {

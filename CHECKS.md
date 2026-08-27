@@ -30,9 +30,10 @@
 
 ## Model-reviewed CLI contract principles
 
-The bounded model review also checks two evidence-heavy configuration contracts that are not safe to infer from syntax alone:
+The bounded model review also checks evidence-heavy CLI contracts that are not safe to infer from syntax alone:
 
 - **Provisional configuration placement.** Report only when changed source explicitly identifies a consumed setting as experimental or subject to incompatible feedback-driven changes, the same CLI already has an experimental configuration boundary, and the setting is introduced outside it. Novelty alone is not evidence. Stable commitments, compatibility aliases, missing or unsuitable experimental boundaries, and already-promoted settings stay quiet.
 - **Operation-family configuration completeness.** Report only when changed runtime source proves one mechanism applies to a concrete sibling operation family, changed operation-specific configuration exposes only a subset, and a proven omitted supported sibling has no aggregate, inherited, or separate equivalent configuration path. Naming similarity, unsupported or fixed-policy operations, and documented authorization, transport, or lifecycle boundaries stay quiet.
+- **Sibling-mode operand grammar.** Report only when prepared source proves existing sibling modes accept the same conceptual operand through one established grouping/arity/delimiter grammar and the changed mode parses that operand differently. Different commands or meanings, explicit compatibility extensions, shared normalization, aliases, incomplete sibling evidence, and style-only differences stay quiet.
 
-Findings must cite the prepared source that proves both the configuration surface and its lifecycle or runtime-family boundary. One high-confidence finding per distinct contract gap is preferred.
+Findings must cite the prepared source that proves both sides of the relevant contract boundary. One high-confidence finding per distinct contract gap is preferred.

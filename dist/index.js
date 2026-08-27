@@ -22939,6 +22939,7 @@ Prioritize these high-value contract stories when evidence supports them (prefer
 9. Long-running children (port-forward/tunnel) started without PID ownership or stop path.
 10. Provisional configuration outside an existing experimental boundary \u2014 a new user-facing setting is explicitly described as experimental or subject to incompatible feedback-driven changes, but is added to the stable configuration namespace even though the same CLI already has an experimental block intended for that lifecycle.
 11. Incomplete configuration across a runtime operation family \u2014 a changed mechanism applies to a concrete family of sibling operations, but the new operation-specific configuration exposes only a subset and leaves equivalent supported siblings without the same control.
+12. Operand grammar drift across sibling modes \u2014 a changed mode accepts the same conceptual operand with observably different arity, grouping, or delimiter semantics than mechanically proven sibling modes in the same CLI.
 
 For incompatible flags or modes, report only when the prepared source proves all of these:
 - both options are accepted by the same command and can be explicitly supplied together;
@@ -22957,6 +22958,12 @@ For configuration-family completeness, report only when the prepared source prov
 - changed operation-specific configuration exposes that mechanism for only a subset of those operations;
 - at least one omitted supported sibling reaches the same mechanism but cannot receive an equivalent setting through an aggregate, inherited, or separate configuration path.
 Do not infer a family from naming similarity alone. Stay quiet when omitted operations are unsupported, deliberately fixed-policy, covered by an aggregate or inherited setting, or separated by a documented authorization, transport, or lifecycle boundary. Cite both the runtime family and the partial configuration surface, and recommend covering the proven omitted siblings or documenting why their policy differs.
+
+For sibling-mode operand grammar, report only when the prepared source proves all of these:
+- existing sibling modes in the same CLI accept the same conceptual operand through one established grouping, arity, and delimiter grammar;
+- the changed mode exposes different observable parsing semantics for that operand, so users or scripts must group the same values differently depending on the mode;
+- no early parser, normalization layer, compatibility alias, or explicit contract note intentionally reconciles or documents the difference.
+Do not infer a shared operand from similar variable names alone. Stay quiet for genuinely different commands or operand meanings, an explicitly documented compatibility extension that normalizes to the established representation, aliases that share one parser, incomplete sibling-mode evidence, and style-only naming differences. Treat a proven mismatch as low severity unless it rejects or misinterprets invocations that the CLI documents as portable across modes. Cite both the established sibling grammar and the changed parser, and recommend one documented grammar or an explicit compatibility boundary.
 
 Do NOT review generic Go style, broad security, observability, databases, or general engineering quality unless it directly breaks the CLI contract.
 Do NOT restate static lifecycle hits (os.Exit, exec.Command without context, context.Background in handlers) unless you add a user-impact angle the static title misses.
@@ -23536,7 +23543,7 @@ function positiveSummary(base, count) {
 function createApp() {
   const app = new Adversary({
     name: domain.name,
-    version: "0.0.27",
+    version: "0.0.28",
     // Domain already ranks and caps findings; keep SDK cap aligned.
     review: { maximumFindings: 3, minimumConfidence: "medium" }
   });
