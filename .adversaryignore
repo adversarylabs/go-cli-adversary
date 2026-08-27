@@ -2,6 +2,7 @@ src/
 test/
 fixtures/
 benchmarks/
+docs/train-drafts/
 scripts/
 coverage/
 .depot/
