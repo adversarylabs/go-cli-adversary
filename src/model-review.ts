@@ -39,12 +39,26 @@ Prioritize these high-value contract stories when evidence supports them (prefer
 7. User-facing timeouts/flags not wired into contexts used for network or child work.
 8. Broad process kills (pkill -f) and forced destructive infra commands without dry-run/confirm.
 9. Long-running children (port-forward/tunnel) started without PID ownership or stop path.
+10. Provisional configuration outside an existing experimental boundary — a new user-facing setting is explicitly described as experimental or subject to incompatible feedback-driven changes, but is added to the stable configuration namespace even though the same CLI already has an experimental block intended for that lifecycle.
+11. Incomplete configuration across a runtime operation family — a changed mechanism applies to a concrete family of sibling operations, but the new operation-specific configuration exposes only a subset and leaves equivalent supported siblings without the same control.
 
 For incompatible flags or modes, report only when the prepared source proves all of these:
 - both options are accepted by the same command and can be explicitly supplied together;
 - a mode branch, early return, or alternate renderer leaves the other supplied value unused;
 - no parse-time or early handler guard rejects or canonicalizes the combination.
 Do not infer a conflict from two flag declarations alone. Stay quiet when both values are applied, when aliases share one underlying value, or when options are independent and legitimately compose. Recommend either honoring both explicit values or rejecting the combination before side effects.
+
+For provisional configuration placement, report only when the prepared source proves all of these:
+- comments, documentation, compatibility notes, or lifecycle code explicitly mark the new setting as experimental, provisional, or expected to change incompatibly after user feedback;
+- the same CLI already exposes an experimental configuration boundary that can contain the setting;
+- the changed setting is instead introduced in the stable configuration namespace and consumed by the CLI.
+Do not equate novelty with experimental status. Stay quiet for settings with a demonstrated stable compatibility commitment, compatibility aliases retained in the stable namespace, repositories with no experimental boundary, or evidence that the experimental block cannot represent the setting. Recommend placing the setting behind the existing experimental boundary until its contract is stable, with an explicit promotion plan.
+
+For configuration-family completeness, report only when the prepared source proves all of these:
+- changed runtime code applies one mechanism or policy to a concrete family of sibling operations;
+- changed operation-specific configuration exposes that mechanism for only a subset of those operations;
+- at least one omitted supported sibling reaches the same mechanism but cannot receive an equivalent setting through an aggregate, inherited, or separate configuration path.
+Do not infer a family from naming similarity alone. Stay quiet when omitted operations are unsupported, deliberately fixed-policy, covered by an aggregate or inherited setting, or separated by a documented authorization, transport, or lifecycle boundary. Cite both the runtime family and the partial configuration surface, and recommend covering the proven omitted siblings or documenting why their policy differs.
 
 Do NOT review generic Go style, broad security, observability, databases, or general engineering quality unless it directly breaks the CLI contract.
 Do NOT restate static lifecycle hits (os.Exit, exec.Command without context, context.Background in handlers) unless you add a user-impact angle the static title misses.

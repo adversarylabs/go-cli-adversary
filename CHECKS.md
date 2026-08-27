@@ -27,3 +27,12 @@
 | `go-cli.subprocess-stderr-discarded` | Medium | Stdout captured while stderr discarded |
 | `go-cli.update-insecure` | High | Self-update or release download is insecure |
 | `go-cli.version-identity` | Low | CLI root lacks inspectable version identity |
+
+## Model-reviewed CLI contract principles
+
+The bounded model review also checks two evidence-heavy configuration contracts that are not safe to infer from syntax alone:
+
+- **Provisional configuration placement.** Report only when changed source explicitly identifies a consumed setting as experimental or subject to incompatible feedback-driven changes, the same CLI already has an experimental configuration boundary, and the setting is introduced outside it. Novelty alone is not evidence. Stable commitments, compatibility aliases, missing or unsuitable experimental boundaries, and already-promoted settings stay quiet.
+- **Operation-family configuration completeness.** Report only when changed runtime source proves one mechanism applies to a concrete sibling operation family, changed operation-specific configuration exposes only a subset, and a proven omitted supported sibling has no aggregate, inherited, or separate equivalent configuration path. Naming similarity, unsupported or fixed-policy operations, and documented authorization, transport, or lifecycle boundaries stay quiet.
+
+Findings must cite the prepared source that proves both the configuration surface and its lifecycle or runtime-family boundary. One high-confidence finding per distinct contract gap is preferred.

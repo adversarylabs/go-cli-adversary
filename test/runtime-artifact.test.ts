@@ -10,6 +10,17 @@ import test from "node:test";
 const execute = promisify(execFile);
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
+test("release identity is coherent across package, manifest, source, and bundle", async () => {
+  const packageJson = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8"));
+  const manifest = await readFile(join(projectRoot, "adversary.yaml"), "utf8");
+  const source = await readFile(join(projectRoot, "src", "index.ts"), "utf8");
+  const bundle = await readFile(join(projectRoot, "dist", "index.js"), "utf8");
+  assert.equal(packageJson.version, "0.0.27");
+  assert.match(manifest, /^version: 0\.0\.27$/m);
+  assert.match(source, /version: "0\.0\.27"/);
+  assert.match(bundle, /version: "0\.0\.27"/);
+});
+
 test("package intent excludes authoring inputs but retains runtime assets", async () => {
   const ignored = new Set(
     (await readFile(join(projectRoot, ".adversaryignore"), "utf8"))
@@ -23,6 +34,7 @@ test("package intent excludes authoring inputs but retains runtime assets", asyn
     "test/",
     "fixtures/",
     "benchmarks/",
+    "docs/train-drafts/",
     "scripts/",
     ".depot/",
     ".git",
@@ -95,6 +107,6 @@ test("the published runtime executes without node_modules", async () => {
   const envelope = JSON.parse(await readFile(output, "utf8"));
   assert.equal(envelope.protocolVersion, 1);
   assert.equal(envelope.result.adversary.name, "go-cli");
-  assert.equal(envelope.result.adversary.version, "0.0.25");
+  assert.equal(envelope.result.adversary.version, "0.0.27");
   assert.deepEqual(envelope.result.findings, []);
 });

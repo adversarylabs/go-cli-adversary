@@ -784,6 +784,11 @@ test("wave B: model prompt prioritizes contract stories and schema allows new ca
   assert.match(GO_CLI_MODEL_PROMPT, /options are independent and legitimately compose/);
   assert.match(GO_CLI_MODEL_PROMPT, /Dry-run/);
   assert.match(GO_CLI_MODEL_PROMPT, /JSON \/ machine-output contract skew/);
+  assert.match(GO_CLI_MODEL_PROMPT, /Provisional configuration outside an existing experimental boundary/);
+  assert.match(GO_CLI_MODEL_PROMPT, /Incomplete configuration across a runtime operation family/);
+  assert.match(GO_CLI_MODEL_PROMPT, /Do not equate novelty with experimental status/);
+  assert.match(GO_CLI_MODEL_PROMPT, /Do not infer a family from naming similarity alone/);
+  assert.match(GO_CLI_MODEL_PROMPT, /aggregate, inherited, or separate configuration path/);
   assert.match(GO_CLI_MODEL_PROMPT, /Do NOT restate static lifecycle hits/);
   const categories = (
     GO_CLI_MODEL_SCHEMA as {
@@ -793,6 +798,194 @@ test("wave B: model prompt prioritizes contract stories and schema allows new ca
   for (const needed of ["json-contract", "deprecation", "validation-order", "dry-run"]) {
     assert.ok(categories.includes(needed), `missing category ${needed}`);
   }
+});
+
+test("SPIRE-shaped configuration change exposes provisional placement and family completeness evidence", async () => {
+  const root = await writeCliFixture("spire-config-contract", {
+    "cmd/spire-agent/cli/run/run.go": `package run
+
+type workloadAPIRateLimitConfig struct {
+	FetchX509SVID *int \`hcl:"fetch_x509_svid"\`
+	FetchJWTSVID  *int \`hcl:"fetch_jwt_svid"\`
+}
+
+type experimentalConfig struct {
+	NamedPipeName string \`hcl:"named_pipe_name"\`
+}
+
+type agentConfig struct {
+	RateLimit    workloadAPIRateLimitConfig \`hcl:"ratelimit"\`
+	Experimental experimentalConfig         \`hcl:"experimental"\`
+}
+
+// Workload API rate limiting is experimental and its configuration may change
+// after operator feedback before a targeted promotion in a later release.
+func NewAgentConfig(c agentConfig) WorkloadAPIRateLimitConfig {
+	return WorkloadAPIRateLimitConfig{
+		FetchX509SVID: intVal(c.RateLimit.FetchX509SVID),
+		FetchJWTSVID:  intVal(c.RateLimit.FetchJWTSVID),
+	}
+}
+`,
+    "pkg/agent/endpoints/ratelimit.go": `package endpoints
+
+type WorkloadAPIRateLimitConfig struct {
+	FetchX509SVID    int
+	FetchJWTSVID     int
+	FetchX509Bundles int
+	FetchJWTBundles  int
+	StreamSecrets    int
+	FetchSecrets     int
+}
+
+func NewWorkloadRateLimiter(c WorkloadAPIRateLimitConfig) *RateLimiter {
+	r := newRateLimiter()
+	r.method("FetchX509SVID", c.FetchX509SVID)
+	r.method("FetchJWTSVID", c.FetchJWTSVID)
+	r.method("FetchX509Bundles", c.FetchX509Bundles)
+	r.method("FetchJWTBundles", c.FetchJWTBundles)
+	r.method("StreamSecrets", c.StreamSecrets)
+	r.method("FetchSecrets", c.FetchSecrets)
+	return r
+}
+`,
+  });
+  const model = capturingModel({
+    assessment: {
+      risk: "medium",
+      summary: "The provisional rate-limit contract is stable-facing and incomplete across supported Workload API operations.",
+    },
+    ship: false,
+    primaryConcern: "incomplete provisional rate-limit configuration",
+    observations: [
+      {
+        id: "experimental-placement",
+        title: "Experimental rate limit in stable configuration",
+        category: "configuration",
+        severity: "medium",
+        confidence: "high",
+        summary: "RateLimit is explicitly experimental but is introduced beside the existing Experimental block.",
+        whyItMatters: "Users may treat a feedback-driven configuration shape as a stable compatibility contract.",
+        recommendation: "Nest RateLimit under Experimental until its configuration contract is ready for promotion.",
+        evidenceIds: [
+          "file:cmd/spire-agent/cli/run/run.go",
+          "file:pkg/agent/endpoints/ratelimit.go",
+        ],
+      },
+      {
+        id: "operation-family",
+        title: "Bundle and secret rate limits are not configurable",
+        category: "completeness",
+        severity: "medium",
+        confidence: "high",
+        summary: "The same rate-limit mechanism covers six Workload API operations, but configuration exposes only the two SVID operations.",
+        whyItMatters: "Operators cannot tune equivalent supported bundle and secret operations.",
+        recommendation: "Expose settings for the four proven sibling operations or document their distinct policy boundary.",
+        evidenceIds: ["file:cmd/spire-agent/cli/run/run.go"],
+      },
+    ],
+  });
+
+  const result = await runWithModel(root, model, {
+    base_ref: "main",
+    head_ref: "HEAD",
+    scan_mode: "changed",
+    changed_files: [
+      "cmd/spire-agent/cli/run/run.go",
+      "pkg/agent/endpoints/ratelimit.go",
+    ],
+  });
+
+  const request = model.requests.find((item) => !isConcernRewriteRequest(item));
+  assert.ok(request);
+  assertBoundedGoCliRequest(request);
+  const prepared = request.input as { sources: Array<{ path: string; content: string }> };
+  const source = prepared.sources.find((item) => item.path === "cmd/spire-agent/cli/run/run.go");
+  assert.match(source?.content ?? "", /Experimental experimentalConfig/);
+  assert.match(source?.content ?? "", /configuration may change/);
+  const runtime = prepared.sources.find(
+    (item) => item.path === "pkg/agent/endpoints/ratelimit.go",
+  );
+  assert.match(runtime?.content ?? "", /FetchX509Bundles/);
+  assert.match(runtime?.content ?? "", /FetchSecrets/);
+  assert.deepEqual(
+    result.observations
+      .filter((item) => item.key.startsWith("go-cli.model."))
+      .map((item) => item.metadata?.category)
+      .sort(),
+    ["completeness", "configuration"],
+  );
+  assert.equal(result.opinion?.ship, false);
+});
+
+test("accepted SPIRE-shaped configuration nests the complete operation family and stays quiet", async () => {
+  const root = await writeCliFixture("spire-config-contract-clean", {
+    "cmd/spire-agent/cli/run/run.go": `package run
+
+type workloadAPIRateLimitConfig struct {
+	FetchX509SVID    *int \`hcl:"fetch_x509_svid"\`
+	FetchJWTSVID     *int \`hcl:"fetch_jwt_svid"\`
+	FetchX509Bundles *int \`hcl:"fetch_x509_bundles"\`
+	FetchJWTBundles  *int \`hcl:"fetch_jwt_bundles"\`
+	StreamSecrets    *int \`hcl:"stream_secrets"\`
+	FetchSecrets     *int \`hcl:"fetch_secrets"\`
+}
+
+type experimentalConfig struct {
+	RateLimit workloadAPIRateLimitConfig \`hcl:"ratelimit"\`
+}
+
+type agentConfig struct {
+	Experimental experimentalConfig \`hcl:"experimental"\`
+}
+
+func NewAgentConfig(c agentConfig) WorkloadAPIRateLimitConfig {
+	r := c.Experimental.RateLimit
+	return WorkloadAPIRateLimitConfig{
+		FetchX509SVID:    intVal(r.FetchX509SVID),
+		FetchJWTSVID:     intVal(r.FetchJWTSVID),
+		FetchX509Bundles: intVal(r.FetchX509Bundles),
+		FetchJWTBundles:  intVal(r.FetchJWTBundles),
+		StreamSecrets:    intVal(r.StreamSecrets),
+		FetchSecrets:     intVal(r.FetchSecrets),
+	}
+}
+`,
+    "pkg/agent/endpoints/ratelimit.go": `package endpoints
+
+type WorkloadAPIRateLimitConfig struct {
+	FetchX509SVID    int
+	FetchJWTSVID     int
+	FetchX509Bundles int
+	FetchJWTBundles  int
+	StreamSecrets    int
+	FetchSecrets     int
+}
+`,
+  });
+  const model = capturingModel({
+    assessment: {
+      risk: "none",
+      summary: "The provisional configuration is isolated and covers every proven operation in the runtime family.",
+    },
+    ship: true,
+    observations: [],
+  });
+
+  const result = await runWithModel(root, model, {
+    base_ref: "main",
+    head_ref: "HEAD",
+    scan_mode: "changed",
+    changed_files: [
+      "cmd/spire-agent/cli/run/run.go",
+      "pkg/agent/endpoints/ratelimit.go",
+    ],
+  });
+  assert.equal(result.opinion?.ship, true);
+  assert.equal(
+    result.observations.filter((item) => item.key.startsWith("go-cli.model.")).length,
+    0,
+  );
 });
 
 test("wave B: json-contract observation is accepted and framed in opinion when primary", async () => {
