@@ -23543,7 +23543,7 @@ function positiveSummary(base, count) {
 function createApp() {
   const app = new Adversary({
     name: domain.name,
-    version: "0.0.28",
+    version: "0.0.29",
     // Domain already ranks and caps findings; keep SDK cap aligned.
     review: { maximumFindings: 3, minimumConfidence: "medium" }
   });
