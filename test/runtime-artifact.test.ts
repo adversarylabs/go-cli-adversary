@@ -15,7 +15,7 @@ test("release identity is coherent across package, manifest, source, and bundle"
   const manifest = await readFile(join(projectRoot, "adversary.yaml"), "utf8");
   const source = await readFile(join(projectRoot, "src", "index.ts"), "utf8");
   const bundle = await readFile(join(projectRoot, "dist", "index.js"), "utf8");
-  assert.equal(packageJson.version, "0.0.28");
+  assert.equal(packageJson.version, "0.0.29");
   assert.match(manifest, /^version: 0\.0\.28$/m);
   assert.match(source, /version: "0\.0\.28"/);
   assert.match(bundle, /version: "0\.0\.28"/);
