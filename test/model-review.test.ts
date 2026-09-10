@@ -1142,3 +1142,106 @@ func run() error { return nil }
     result.observations.some((n) => n.key?.includes("json-skew") || (n.summary ?? "").includes("JSON")),
   );
 });
+
+// These fixtures verify that the model receives the evidence needed to judge
+// cancellation. The stub does not measure live-model recall or precision.
+for (const fixture of [
+  {
+    name: "swallowed-parent-cancellation",
+    handler: `// Fetch returns ctx.Err() when the command is cancelled.
+func refresh(ctx context.Context) error {
+    if err := fetch(ctx); err != nil { log.Print(err); return nil }
+    return nil
+}`,
+    continuation: `if err := refresh(ctx); err != nil { return err }
+    return execute(ctx)`,
+    expectedEvidence: /log.Print\(err\); return nil/,
+  },
+  {
+    name: "propagated-wrapped-cancellation",
+    handler: `func refresh(ctx context.Context) error {
+    if err := fetch(ctx); err != nil {
+        if ctx.Err() != nil { return fmt.Errorf("refresh interrupted: %w", ctx.Err()) }
+        log.Print(err)
+    }
+    return nil
+}`,
+    continuation: `if err := refresh(ctx); err != nil { return err }
+    return execute(ctx)`,
+    expectedEvidence: /fmt.Errorf\("refresh interrupted: %w", ctx.Err\(\)\)/,
+  },
+  {
+    name: "caller-checks-before-continuation",
+    handler: `func refresh(ctx context.Context) error {
+    if err := fetch(ctx); err != nil { log.Print(err); return nil }
+    return nil
+}`,
+    continuation: `if err := refresh(ctx); err != nil { return err }
+    if err := ctx.Err(); err != nil { return err }
+    return execute(ctx)`,
+    expectedEvidence: /if err := ctx.Err\(\); err != nil/,
+  },
+  {
+    name: "recoverable-child-timeout",
+    handler: `func refresh(ctx context.Context) error {
+    child, cancel := context.WithTimeout(ctx, time.Second)
+    defer cancel()
+    if err := fetch(child); err != nil {
+        if ctx.Err() != nil { return ctx.Err() }
+        if errors.Is(err, context.DeadlineExceeded) { return nil }
+        return err
+    }
+    return nil
+}`,
+    continuation: `if err := refresh(ctx); err != nil { return err }
+    return execute(ctx)`,
+    expectedEvidence: /fetch\(child\)/,
+  },
+]) {
+  test(`cancellation evidence: ${fixture.name}`, async () => {
+    const root = await writeCliFixture(fixture.name, {
+      "cmd/run.go": `package cmd
+import "context"
+func run(ctx context.Context) error {
+    ${fixture.continuation}
+}
+// execute does not check ctx before starting work.
+func execute(ctx context.Context) error { return writeReport() }
+`,
+      "cmd/refresh.go": `package cmd
+import (
+    "context"
+    "errors"
+    "fmt"
+    "log"
+    "time"
+)
+${fixture.handler}
+func fetch(ctx context.Context) error {
+    select {
+    case <-ctx.Done(): return ctx.Err()
+    case <-ready: return nil
+    }
+}
+`,
+    });
+    const model = capturingModel({
+      assessment: { risk: "none", summary: "Fixture response for evidence transport only." },
+      ship: true,
+      observations: [],
+    });
+    await runWithModel(root, model, {
+      base_ref: "main", head_ref: "HEAD", scan_mode: "changed",
+      changed_files: ["cmd/run.go", "cmd/refresh.go"],
+    });
+    const request = model.requests.find((r) => !isConcernRewriteRequest(r));
+    assert.ok(request);
+    const input = request.input as { sources: Array<{ path: string; content: string }> };
+    const evidence = input.sources.map((s) => s.content).join("\n");
+    assert.match(evidence, fixture.expectedEvidence);
+    assert.match(evidence, /case <-ctx.Done\(\): return ctx.Err\(\)/);
+    assert.match(evidence, /return execute\(ctx\)/);
+    assert.match(request.prompt, /Passing cmd.Context\(\) alone does not establish correct cancellation handling/);
+    assert.match(request.prompt, /recoverable child-operation timeout is not cancellation of the parent command/);
+  });
+}

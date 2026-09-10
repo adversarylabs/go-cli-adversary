@@ -14,7 +14,7 @@ Review Go CLIs for configuration, cancellation, diagnostics, and exit behavior.
 
 - Flag/env config predictability
 - Positional argument validation that keeps command callbacks from indexing missing operands
-- Signal/cancellation handling in CLIs
+- Signal/cancellation handling in CLIs, including command cancellation swallowed by best-effort recovery before continued work or success
 - Exit codes and user-visible diagnostics
 - Context plumbing in command handlers
 
