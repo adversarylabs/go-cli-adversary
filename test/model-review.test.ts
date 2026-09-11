@@ -1251,3 +1251,50 @@ test("miss-derived policy requires contract evidence and clean counterexamples",
   assert.ok(GO_CLI_MODEL_PROMPT.includes('intentional reusable cache'));
   assert.ok(GO_CLI_MODEL_PROMPT.includes('Never recommend deleting shared content blindly'));
 });
+
+for (const accounting of [
+  { name: "planned-as-completed", field: "Selected", contract: "counts successfully completed jobs", guard: "" },
+  { name: "partial-completions", field: "Completed", contract: "counts successfully completed jobs", guard: "" },
+  { name: "explicit-selections", field: "Selected", contract: "counts selected jobs, not executions", guard: "" },
+  { name: "success-guard", field: "Selected", contract: "counts successfully completed jobs", guard: "if err != nil { return err }" },
+]) {
+  test(`execution accounting evidence: ${accounting.name}`, async () => {
+    const root = await writeCliFixture(accounting.name, {
+      "cmd/run.go": `package cmd
+func run(jobs []string, onStart func(string) error, execute func(string) error) error {
+ result, err := batch(jobs, onStart, execute)
+ ${accounting.guard}
+ reportUsage(result.${accounting.field})
+ return err
+}`,
+      "cmd/batch.go": `package cmd
+type Result struct { Selected, Completed []string }
+func batch(jobs []string, onStart func(string) error, execute func(string) error) (Result, error) {
+ result := Result{Selected: jobs}
+ for _, job := range jobs {
+  if err := onStart(job); err != nil { return result, err }
+  if err := execute(job); err != nil { return result, err }
+  result.Completed = append(result.Completed, job)
+ }
+ return result, nil
+}`,
+      "cmd/usage.go": `package cmd
+// reportUsage ${accounting.contract} for the CLI usage summary.
+func reportUsage(jobs []string) { usageSink.Add(len(jobs)) }
+`,
+    });
+    const model = capturingModel({ assessment: { risk: "none", summary: "Evidence transport only." }, ship: true, observations: [] });
+    await runWithModel(root, model, { base_ref: "main", head_ref: "HEAD", scan_mode: "changed", changed_files: ["cmd/run.go", "cmd/batch.go", "cmd/usage.go"] });
+    const requests = model.requests.filter(r => !isConcernRewriteRequest(r));
+    assert.equal(requests.length, 1, "accounting policy must reuse the existing model pass");
+    const request = requests[0]!;
+    const input = request.input as { sources: Array<{ path: string; content: string }> };
+    const source = input.sources.map(s => s.content).join("\n");
+    assert.ok(source.includes(`reportUsage(result.${accounting.field})`));
+    assert.ok(source.includes(accounting.contract));
+    assert.ok(source.includes("if err := onStart(job); err != nil { return result, err }"));
+    assert.ok(source.includes("result.Completed = append(result.Completed, job)"));
+    assert.ok(request.prompt.includes("A dry-run guard alone does not prove every selected item ran"));
+    assert.ok(request.prompt.includes("do not recommend dropping all usage on every error"));
+  });
+}
