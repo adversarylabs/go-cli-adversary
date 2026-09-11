@@ -1245,3 +1245,9 @@ func fetch(ctx context.Context) error {
     assert.match(request.prompt, /recoverable child-operation timeout is not cancellation of the parent command/);
   });
 }
+
+test("miss-derived policy requires contract evidence and clean counterexamples", () => {
+  assert.ok(GO_CLI_MODEL_PROMPT.includes('Trace partial command commits'));
+  assert.ok(GO_CLI_MODEL_PROMPT.includes('intentional reusable cache'));
+  assert.ok(GO_CLI_MODEL_PROMPT.includes('Never recommend deleting shared content blindly'));
+});
