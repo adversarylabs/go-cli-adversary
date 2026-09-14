@@ -556,6 +556,7 @@ test("prepared model input stays bounded and includes change plus deterministic 
       headRef: "HEAD",
       worktree: false,
       changedFiles: ["cmd/root.go"],
+      changedRanges: [],
       type: "diff",
     },
     {
